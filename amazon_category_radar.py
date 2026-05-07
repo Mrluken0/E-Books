@@ -358,7 +358,7 @@ def analyze_category(category, url, max_books=20):
 
         # Visite page produit pour le top N
         if rank <= PRODUCT_PAGE_LIMIT and product_url:
-            print(f"      → Page produit #{rank}: {title[:50]}...")
+            print(f"      -> Page produit #{rank}: {title[:50]}...")
             details = get_product_details(product_url)
             book.update(details)
             time.sleep(0.8)  # délai entre pages produit
