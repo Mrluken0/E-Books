@@ -4,6 +4,8 @@ import pandas as pd
 import time
 import re
 from datetime import datetime
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
 
 BASE_URL = "https://www.amazon.fr"
 START_URL = "https://www.amazon.fr/gp/bestsellers/books"
