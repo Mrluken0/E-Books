@@ -336,10 +336,14 @@ def get_product_details(product_url):
                 match = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\d{4})", text)
                 if match:
                     details["publication_date"] = match.group(1)
-            if ("classement" in tl or "meilleure vente" in tl) and not details["bsr"]:
-                match = re.search(r"#\s*(\d[\d\s\.]*)\s+dans", text) or re.search(r"n[°o]?\s*(\d[\d\s]*)\s+dans", text, re.I)
+            if ("classement" in label or "best" in label) and not details["bsr"]:
+                match = re.search(r":\s*([\d\s]+)\s+en\s+", value)
+                if not match:
+                    match = re.search(r":\s*([\d\s]+)\s+dans\s+", value)
+                if not match:
+                    match = re.search(r"n[°o]?\s*(\d[\d\s]*)", value, re.I)
                 if match:
-                    details["bsr"] = int(re.sub(r"[\s\.]", "", match.group(1)))
+                    details["bsr"] = int(re.sub(r"\s", "", match.group(1)))
 
         for row in soup.select(
             "#productDetails_detailBullets_sections1 tr,"
