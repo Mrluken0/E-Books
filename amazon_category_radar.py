@@ -4,8 +4,6 @@ import pandas as pd
 import time
 import re
 from datetime import datetime
-import sys
-sys.stdout.reconfigure(encoding="utf-8")
 
 BASE_URL = "https://www.amazon.fr"
 START_URL = "https://www.amazon.fr/gp/bestsellers/books"
@@ -166,44 +164,80 @@ def get_title(item):
 
 def get_rating(item):
     """Extrait la note moyenne depuis la page liste."""
-    selectors = [
-        "span.a-icon-alt",
-        "i.a-icon-star span.a-icon-alt",
-        "span[aria-label*='étoile']",
-        "span[aria-label*='sur 5']"
-    ]
-    for selector in selectors:
-        el = item.select_one(selector)
-        if el:
-            text = el.get_text()
-            match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", text)
-            if match:
-                return float(match.group(1).replace(",", "."))
-    # Fallback : aria-label sur l'élément étoile
-    star_el = item.select_one("i[class*='a-icon-star']")
-    if star_el:
-        aria = star_el.get("aria-label", "")
-        match = re.search(r"(\d+[,.]?\d*)", aria)
+    # Priorité 1 : span.a-icon-alt contenant "sur 5"
+    for el in item.select("span.a-icon-alt"):
+        text = el.get_text()
+        match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", text)
         if match:
             return float(match.group(1).replace(",", "."))
+
+    # Priorité 2 : aria-label sur n'importe quel élément contenant "sur 5"
+    for el in item.select("[aria-label]"):
+        aria = el.get("aria-label", "")
+        match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", aria)
+        if match:
+            return float(match.group(1).replace(",", "."))
+
+    # Priorité 3 : icône étoile avec aria-label numérique
+    for el in item.select("i[class*='a-icon-star'], span[class*='a-icon-star']"):
+        aria = el.get("aria-label", "")
+        match = re.search(r"(\d+[,.]?\d*)", aria)
+        if match:
+            val = float(match.group(1).replace(",", "."))
+            if 1.0 <= val <= 5.0:
+                return val
+
+    # Priorité 4 : texte brut contenant "sur 5" n'importe où dans l'item
+    full_text = item.get_text()
+    match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", full_text)
+    if match:
+        val = float(match.group(1).replace(",", "."))
+        if 1.0 <= val <= 5.0:
+            return val
+
     return None
 
 
 def get_reviews_count(item):
     """Extrait le nombre de reviews depuis la page liste."""
-    selectors = [
-        "span.a-size-small a span",
-        "span[aria-label*='avis']",
-        "a[href*='customerReviews'] span",
-        "div.a-section span.a-size-small"
-    ]
-    for selector in selectors:
-        el = item.select_one(selector)
-        if el:
-            text = el.get_text().replace("\xa0", "").replace(" ", "").replace(",", "")
-            match = re.search(r"(\d+)", text)
-            if match:
-                return int(match.group(1))
+    def parse_count(text):
+        text = text.replace("\xa0", "").replace(" ", "").replace(",", "").replace(".", "")
+        match = re.search(r"(\d+)", text)
+        if match:
+            return int(match.group(1))
+        return None
+
+    # Priorité 1 : aria-label contenant "évaluation" ou "avis"
+    for el in item.select("[aria-label]"):
+        aria = el.get("aria-label", "")
+        if "évaluation" in aria.lower() or "avis" in aria.lower():
+            val = parse_count(aria)
+            if val is not None and val > 0:
+                return val
+
+    # Priorité 2 : lien vers customerReviews
+    for el in item.select("a[href*='customerReviews'], a[href*='#customerReviews']"):
+        val = parse_count(el.get_text())
+        if val is not None and val > 0:
+            return val
+
+    # Priorité 3 : span contenant uniquement un nombre (pattern reviews Amazon)
+    for el in item.select("span.a-size-small, span.a-size-base"):
+        text = el.get_text().strip().replace("\xa0", "").replace(" ", "")
+        # Un nombre seul ou suivi de "avis"/"évaluations"
+        if re.match(r"^\d[\d\s,\.]*$", text) or re.match(r"^\d[\d\s,\.]*\s*(avis|évaluation)", text, re.IGNORECASE):
+            val = parse_count(text)
+            if val is not None and 1 <= val <= 500000:
+                return val
+
+    # Priorité 4 : data-asin + pattern reviews dans tout l'item
+    full_text = item.get_text()
+    matches = re.findall(r"(\d[\d\s]*)\s*(?:avis|évaluations|évaluation)", full_text, re.IGNORECASE)
+    if matches:
+        val = parse_count(matches[0])
+        if val is not None and val > 0:
+            return val
+
     return None
 
 
@@ -224,18 +258,17 @@ def get_product_url(item):
 def get_product_details(product_url):
     """
     Visite la page produit et extrait :
-    - sous-titre
-    - description
-    - date de publication
-    - nombre de pages
-    - BSR (Best Seller Rank réel dans la catégorie)
+    - sous-titre, description, date de publication, nombre de pages, BSR
+    - rating et reviews_count en fallback si manquants sur la liste
     """
     details = {
         "subtitle": "",
         "description": "",
         "publication_date": "",
         "pages": None,
-        "bsr": None
+        "bsr": None,
+        "rating_page": None,
+        "reviews_count_page": None
     }
 
     try:
@@ -250,18 +283,34 @@ def get_product_details(product_url):
         desc_selectors = [
             "#bookDescription_feature_div",
             "#productDescription",
-            "div[data-feature-name='bookDescription']"
+            "div[data-feature-name='bookDescription']",
+            "#feature-bullets"
         ]
         for sel in desc_selectors:
             desc_el = soup.select_one(sel)
             if desc_el:
-                # Supprimer les balises "Lire la suite" etc.
-                for tag in desc_el.select("span.a-expander-prompt, noscript"):
+                for tag in desc_el.select("span.a-expander-prompt, noscript, style, script"):
                     tag.decompose()
                 raw = clean_text(desc_el.get_text())
-                if raw:
-                    details["description"] = raw[:1500]  # cap à 1500 chars
+                if raw and len(raw) > 30:
+                    details["description"] = raw[:1500]
                     break
+
+        # --- Rating page produit (fallback) ---
+        rating_el = soup.select_one("span#acrPopover, span[data-hook='rating-out-of-text']")
+        if rating_el:
+            text = rating_el.get("title", "") or rating_el.get_text()
+            match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", text)
+            if match:
+                details["rating_page"] = float(match.group(1).replace(",", "."))
+
+        # --- Reviews count page produit (fallback) ---
+        reviews_el = soup.select_one("span#acrCustomerReviewText, span[data-hook='total-review-count']")
+        if reviews_el:
+            text = reviews_el.get_text().replace("\xa0", "").replace(" ", "").replace(",", "")
+            match = re.search(r"(\d+)", text)
+            if match:
+                details["reviews_count_page"] = int(match.group(1))
 
         # --- Détails produit (pages, date, BSR) ---
         # Format 1 : detailBullets
@@ -270,44 +319,52 @@ def get_product_details(product_url):
             text = clean_text(li.get_text())
             text_lower = text.lower()
 
-            if "nombre de pages" in text_lower or "pages" in text_lower:
+            if ("nombre de pages" in text_lower or "pages" in text_lower) and not details["pages"]:
                 match = re.search(r"(\d{2,4})\s*pages?", text, re.IGNORECASE)
                 if match:
                     details["pages"] = int(match.group(1))
 
-            if "date de publication" in text_lower or "éditeur" in text_lower:
+            if ("date de publication" in text_lower or "éditeur" in text_lower) and not details["publication_date"]:
                 match = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\d{4})", text)
                 if match:
                     details["publication_date"] = match.group(1)
 
-            if "classement" in text_lower or "best.seller" in text_lower or "bsr" in text_lower:
-                match = re.search(r"n[°o]?\s*(\d[\d\s]*)", text, re.IGNORECASE)
+            # BSR Amazon.fr — format "#1 dans Cuisine"
+            if ("classement" in text_lower or "meilleure vente" in text_lower) and not details["bsr"]:
+                match = re.search(r"#\s*(\d[\d\s\.]*)\s+dans", text)
+                if not match:
+                    match = re.search(r"n[°o]?\s*(\d[\d\s]*)\s+dans", text, re.IGNORECASE)
                 if match:
-                    details["bsr"] = int(match.group(1).replace(" ", ""))
+                    details["bsr"] = int(re.sub(r"[\s\.]", "", match.group(1)))
 
         # Format 2 : productDetails table
-        if not details["pages"] or not details["publication_date"]:
-            rows = soup.select("#productDetails_detailBullets_sections1 tr, #productDetails_techSpec_section_1 tr")
-            for row in rows:
-                th = row.select_one("th")
-                td = row.select_one("td")
-                if not th or not td:
-                    continue
-                label = clean_text(th.get_text()).lower()
-                value = clean_text(td.get_text())
+        rows = soup.select(
+            "#productDetails_detailBullets_sections1 tr, "
+            "#productDetails_techSpec_section_1 tr, "
+            "#productDetails_db_sections tr"
+        )
+        for row in rows:
+            th = row.select_one("th")
+            td = row.select_one("td")
+            if not th or not td:
+                continue
+            label = clean_text(th.get_text()).lower()
+            value = clean_text(td.get_text())
 
-                if "pages" in label and not details["pages"]:
-                    match = re.search(r"(\d+)", value)
-                    if match:
-                        details["pages"] = int(match.group(1))
+            if "pages" in label and not details["pages"]:
+                match = re.search(r"(\d+)", value)
+                if match:
+                    details["pages"] = int(match.group(1))
 
-                if ("date" in label or "publication" in label) and not details["publication_date"]:
-                    details["publication_date"] = value
+            if ("date" in label or "publication" in label) and not details["publication_date"]:
+                details["publication_date"] = value
 
-                if ("classement" in label or "best" in label) and not details["bsr"]:
-                    match = re.search(r"(\d[\d\s]*)", value)
-                    if match:
-                        details["bsr"] = int(match.group(1).replace(" ", ""))
+            if ("classement" in label or "best" in label) and not details["bsr"]:
+                match = re.search(r"#\s*(\d[\d\s\.]*)", value)
+                if not match:
+                    match = re.search(r"(\d[\d\s\.]*)", value)
+                if match:
+                    details["bsr"] = int(re.sub(r"[\s\.]", "", match.group(1)))
 
     except Exception as e:
         print(f"    ⚠️ Erreur page produit {product_url}: {e}")
@@ -360,8 +417,15 @@ def analyze_category(category, url, max_books=20):
         if rank <= PRODUCT_PAGE_LIMIT and product_url:
             print(f"      -> Page produit #{rank}: {title[:50]}...")
             details = get_product_details(product_url)
-            book.update(details)
-            time.sleep(0.8)  # délai entre pages produit
+            # Fallback rating/reviews si manquants sur la liste
+            if book["rating"] is None and details.get("rating_page") is not None:
+                book["rating"] = details["rating_page"]
+            if book["reviews_count"] is None and details.get("reviews_count_page") is not None:
+                book["reviews_count"] = details["reviews_count_page"]
+            # Ne pas écraser avec les champs fallback — on garde uniquement les champs enrichis
+            for key in ["subtitle", "description", "publication_date", "pages", "bsr"]:
+                book[key] = details.get(key)
+            time.sleep(0.8)
 
         books.append(book)
 
