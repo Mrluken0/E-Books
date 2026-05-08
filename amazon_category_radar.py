@@ -4,6 +4,8 @@ import pandas as pd
 import time
 import re
 from datetime import datetime
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
 
 BASE_URL = "https://www.amazon.fr"
 START_URL = "https://www.amazon.fr/gp/bestsellers/books"
@@ -529,7 +531,7 @@ def main():
         summary.to_excel(writer, sheet_name="scores", index=False)
         df.to_excel(writer, sheet_name="data", index=False)
 
-    print(f"\n✅ Terminé : {OUTPUT_FILE}")
+    print(f"\nTerminé : {OUTPUT_FILE}")
     print(f"   Catégories : {len(summary)}")
     print(f"   Livres scrapés : {len(df)}")
     print(f"   Livres avec page produit : {df['description'].notna().sum()}")
