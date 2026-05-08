@@ -1,22 +1,45 @@
+import sys
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
 import time
 import re
-from datetime import datetime
-import sys
+import random
+from pathlib import Path
+
 sys.stdout.reconfigure(encoding="utf-8")
 
 BASE_URL = "https://www.amazon.fr"
 START_URL = "https://www.amazon.fr/gp/bestsellers/books"
 
 OUTPUT_FILE = r"C:\Users\luken\Desktop\LKN Digital\Automation\KDP-Automation\radar_kdp_clean.xlsx"
+TEMP_FILE   = r"C:\Users\luken\Desktop\LKN Digital\Automation\KDP-Automation\radar_kdp_temp.xlsx"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8"
-}
+# ── 1. Rotation User-Agent ────────────────────────────────────────────────────
+UA_LIST = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+]
+
+# ── 2. Headers complets ───────────────────────────────────────────────────────
+def get_headers():
+    return {
+        "User-Agent": random.choice(UA_LIST),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Cache-Control": "max-age=0",
+    }
 
 EXCLUDED = [
     "roman", "fiction", "thriller", "fantasy", "fantastique", "manga", "bd",
@@ -42,8 +65,13 @@ PRACTICAL_KEYWORDS = [
     "pas à pas", "habitudes"
 ]
 
-# Nombre de livres pour lesquels on visite la page produit
 PRODUCT_PAGE_LIMIT = 10
+
+BLOCK_SIGNALS = [
+    "robot check", "captcha", "enter the characters you see below",
+    "sorry, we just need to make sure you're not a robot",
+    "veuillez saisir les caractères", "api-services-support@amazon.com"
+]
 
 
 def clean_text(text):
@@ -52,43 +80,84 @@ def clean_text(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def get_soup(url):
-    response = requests.get(url, headers=HEADERS, timeout=20)
-    response.raise_for_status()
-    return BeautifulSoup(response.text, "html.parser")
+# ── 3. Retry automatique ─────────────────────────────────────────────────────
+def get_soup(url, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=get_headers(), timeout=25)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            # ── 4. Détection blocage Amazon ──────────────────────────────────
+            page_text = soup.get_text().lower()
+            if any(signal in page_text for signal in BLOCK_SIGNALS):
+                wait = (attempt + 1) * random.uniform(8, 15)
+                print(f"    [BLOCAGE] Amazon bloque. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                time.sleep(wait)
+                continue
+
+            return soup
+
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code
+            if code in (429, 503):
+                wait = (attempt + 1) * random.uniform(5, 10)
+                print(f"    [HTTP {code}] Rate limited. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                time.sleep(wait)
+            else:
+                raise
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                wait = (attempt + 1) * random.uniform(3, 6)
+                print(f"    [RESEAU] {e}. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                time.sleep(wait)
+            else:
+                raise
+
+    raise Exception(f"Echec apres {max_retries} tentatives : {url}")
+
+
+# ── 5. Sauvegarde intermédiaire ───────────────────────────────────────────────
+def save_intermediate(all_books):
+    if not all_books:
+        return
+    try:
+        df = pd.DataFrame(all_books)
+        df = df[df["title"].notna() & (df["title"].str.strip() != "")]
+        if df.empty:
+            return
+        summary = compute_scores(df)
+        with pd.ExcelWriter(TEMP_FILE, engine="openpyxl") as writer:
+            summary.to_excel(writer, sheet_name="scores", index=False)
+            df.to_excel(writer, sheet_name="data", index=False)
+        print(f"    [SAVE] Sauvegarde temp OK ({len(df)} livres, {len(summary)} categories)")
+    except Exception as e:
+        print(f"    [SAVE] Erreur : {e}")
 
 
 def is_excluded(name):
-    name = name.lower()
-    return any(word in name for word in EXCLUDED)
+    return any(word in name.lower() for word in EXCLUDED)
 
 
 def is_business_category(name):
-    name = name.lower()
-    return any(word in name for word in BUSINESS_KEYWORDS)
+    return any(word in name.lower() for word in BUSINESS_KEYWORDS)
 
 
 def valid_category(name, href):
     if not name or not href:
         return False
-    name_lower = name.lower().strip()
-    if len(name_lower) < 3:
+    nl = name.lower().strip()
+    if len(nl) < 3 or nl.isdigit():
         return False
-    if name_lower.isdigit():
+    if is_excluded(nl):
         return False
-    if is_excluded(name_lower):
-        return False
-    if "/gp/bestsellers/books/" not in href:
-        return False
-    if "pg=" in href:
+    if "/gp/bestsellers/books/" not in href or "pg=" in href:
         return False
     return True
 
 
 def normalize_url(href):
-    if href.startswith("/"):
-        return BASE_URL + href
-    return href
+    return BASE_URL + href if href.startswith("/") else href
 
 
 def get_main_categories():
@@ -122,24 +191,15 @@ def get_subcategories(url):
 def extract_price(text):
     if not text:
         return None
-    text = text.replace(",", ".")
-    match = re.search(r"(\d+(?:\.\d+)?)", text)
-    if match:
-        return float(match.group(1))
-    return None
+    match = re.search(r"(\d+(?:[,.]\d+)?)", text.replace(",", "."))
+    return float(match.group(1)) if match else None
 
 
 def get_price(item):
-    selectors = [
-        ".a-price .a-offscreen",
-        ".p13n-sc-price",
-        "span.a-color-price",
-        "span.a-size-base.a-color-price"
-    ]
-    for selector in selectors:
-        price_el = item.select_one(selector)
-        if price_el:
-            price = extract_price(price_el.get_text())
+    for selector in [".a-price .a-offscreen", ".p13n-sc-price", "span.a-color-price", "span.a-size-base.a-color-price"]:
+        el = item.select_one(selector)
+        if el:
+            price = extract_price(el.get_text())
             if price is not None:
                 return price
     return None
@@ -149,106 +209,77 @@ def get_title(item):
     img = item.select_one("img")
     if img and img.get("alt"):
         return clean_text(img.get("alt"))
-    selectors = [
+    for selector in [
         "div._cDEzb_p13n-sc-css-line-clamp-1_1Fn1y",
         "div._cDEzb_p13n-sc-css-line-clamp-2_EWgCb",
         "span.a-size-medium",
         "span.a-size-base-plus"
-    ]
-    for selector in selectors:
-        title_el = item.select_one(selector)
-        if title_el:
-            title = clean_text(title_el.get_text())
+    ]:
+        el = item.select_one(selector)
+        if el:
+            title = clean_text(el.get_text())
             if title:
                 return title
     return ""
 
 
 def get_rating(item):
-    """Extrait la note moyenne depuis la page liste."""
-    # Priorité 1 : span.a-icon-alt contenant "sur 5"
     for el in item.select("span.a-icon-alt"):
-        text = el.get_text()
-        match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", text)
+        match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", el.get_text())
         if match:
             return float(match.group(1).replace(",", "."))
-
-    # Priorité 2 : aria-label sur n'importe quel élément contenant "sur 5"
     for el in item.select("[aria-label]"):
-        aria = el.get("aria-label", "")
-        match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", aria)
+        match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", el.get("aria-label", ""))
         if match:
             return float(match.group(1).replace(",", "."))
-
-    # Priorité 3 : icône étoile avec aria-label numérique
     for el in item.select("i[class*='a-icon-star'], span[class*='a-icon-star']"):
-        aria = el.get("aria-label", "")
-        match = re.search(r"(\d+[,.]?\d*)", aria)
+        match = re.search(r"(\d+[,.]?\d*)", el.get("aria-label", ""))
         if match:
             val = float(match.group(1).replace(",", "."))
             if 1.0 <= val <= 5.0:
                 return val
-
-    # Priorité 4 : texte brut contenant "sur 5" n'importe où dans l'item
-    full_text = item.get_text()
-    match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", full_text)
+    match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", item.get_text())
     if match:
         val = float(match.group(1).replace(",", "."))
         if 1.0 <= val <= 5.0:
             return val
-
     return None
 
 
 def get_reviews_count(item):
-    """Extrait le nombre de reviews depuis la page liste."""
     def parse_count(text):
-        text = text.replace("\xa0", "").replace(" ", "").replace(",", "").replace(".", "")
+        text = re.sub(r"[\xa0\s,\.]", "", str(text))
         match = re.search(r"(\d+)", text)
-        if match:
-            return int(match.group(1))
-        return None
+        return int(match.group(1)) if match else None
 
-    # Priorité 1 : aria-label contenant "évaluation" ou "avis"
     for el in item.select("[aria-label]"):
         aria = el.get("aria-label", "")
         if "évaluation" in aria.lower() or "avis" in aria.lower():
             val = parse_count(aria)
-            if val is not None and val > 0:
+            if val and val > 0:
                 return val
-
-    # Priorité 2 : lien vers customerReviews
     for el in item.select("a[href*='customerReviews'], a[href*='#customerReviews']"):
         val = parse_count(el.get_text())
-        if val is not None and val > 0:
+        if val and val > 0:
             return val
-
-    # Priorité 3 : span contenant uniquement un nombre (pattern reviews Amazon)
     for el in item.select("span.a-size-small, span.a-size-base"):
-        text = el.get_text().strip().replace("\xa0", "").replace(" ", "")
-        # Un nombre seul ou suivi de "avis"/"évaluations"
-        if re.match(r"^\d[\d\s,\.]*$", text) or re.match(r"^\d[\d\s,\.]*\s*(avis|évaluation)", text, re.IGNORECASE):
+        text = el.get_text().strip()
+        if re.match(r"^\d[\d\s,\.]*$", text) or re.match(r"^\d[\d\s,\.]*\s*(avis|évaluation)", text, re.I):
             val = parse_count(text)
-            if val is not None and 1 <= val <= 500000:
+            if val and 1 <= val <= 500000:
                 return val
-
-    # Priorité 4 : data-asin + pattern reviews dans tout l'item
-    full_text = item.get_text()
-    matches = re.findall(r"(\d[\d\s]*)\s*(?:avis|évaluations|évaluation)", full_text, re.IGNORECASE)
+    matches = re.findall(r"(\d[\d\s]*)\s*(?:avis|évaluations|évaluation)", item.get_text(), re.I)
     if matches:
         val = parse_count(matches[0])
-        if val is not None and val > 0:
+        if val and val > 0:
             return val
-
     return None
 
 
 def get_product_url(item):
-    """Extrait l'URL de la page produit depuis un item de la liste."""
     link = item.select_one("a[href*='/dp/']")
     if link:
-        href = link.get("href", "")
-        return normalize_url(href.split("?")[0])
+        return normalize_url(link.get("href", "").split("?")[0])
     img = item.select_one("img")
     if img:
         parent = img.find_parent("a")
@@ -258,156 +289,125 @@ def get_product_url(item):
 
 
 def get_product_details(product_url):
-    """
-    Visite la page produit et extrait :
-    - sous-titre, description, date de publication, nombre de pages, BSR
-    - rating et reviews_count en fallback si manquants sur la liste
-    """
     details = {
-        "subtitle": "",
-        "description": "",
-        "publication_date": "",
-        "pages": None,
-        "bsr": None,
-        "rating_page": None,
-        "reviews_count_page": None
+        "subtitle": "", "description": "", "publication_date": "",
+        "pages": None, "bsr": None, "rating_page": None, "reviews_count_page": None
     }
 
     try:
         soup = get_soup(product_url)
 
-        # --- Sous-titre ---
-        subtitle_el = soup.select_one("span#subtitle")
-        if subtitle_el:
-            details["subtitle"] = clean_text(subtitle_el.get_text())
+        el = soup.select_one("span#subtitle")
+        if el:
+            details["subtitle"] = clean_text(el.get_text())
 
-        # --- Description ---
-        desc_selectors = [
-            "#bookDescription_feature_div",
-            "#productDescription",
-            "div[data-feature-name='bookDescription']",
-            "#feature-bullets"
-        ]
-        for sel in desc_selectors:
-            desc_el = soup.select_one(sel)
-            if desc_el:
-                for tag in desc_el.select("span.a-expander-prompt, noscript, style, script"):
+        for sel in ["#bookDescription_feature_div", "#productDescription",
+                    "div[data-feature-name='bookDescription']", "#feature-bullets"]:
+            el = soup.select_one(sel)
+            if el:
+                for tag in el.select("span.a-expander-prompt, noscript, style, script"):
                     tag.decompose()
-                raw = clean_text(desc_el.get_text())
+                raw = clean_text(el.get_text())
                 if raw and len(raw) > 30:
                     details["description"] = raw[:1500]
                     break
 
-        # --- Rating page produit (fallback) ---
-        rating_el = soup.select_one("span#acrPopover, span[data-hook='rating-out-of-text']")
-        if rating_el:
-            text = rating_el.get("title", "") or rating_el.get_text()
+        el = soup.select_one("span#acrPopover, span[data-hook='rating-out-of-text']")
+        if el:
+            text = el.get("title", "") or el.get_text()
             match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", text)
             if match:
                 details["rating_page"] = float(match.group(1).replace(",", "."))
 
-        # --- Reviews count page produit (fallback) ---
-        reviews_el = soup.select_one("span#acrCustomerReviewText, span[data-hook='total-review-count']")
-        if reviews_el:
-            text = reviews_el.get_text().replace("\xa0", "").replace(" ", "").replace(",", "")
-            match = re.search(r"(\d+)", text)
+        el = soup.select_one("span#acrCustomerReviewText, span[data-hook='total-review-count']")
+        if el:
+            match = re.search(r"(\d+)", re.sub(r"[\xa0\s,]", "", el.get_text()))
             if match:
                 details["reviews_count_page"] = int(match.group(1))
 
-        # --- Détails produit (pages, date, BSR) ---
-        # Format 1 : detailBullets
-        bullets = soup.select("#detailBulletsWrapper_feature_div li, #detailBullets_feature_div li")
-        for li in bullets:
+        for li in soup.select("#detailBulletsWrapper_feature_div li, #detailBullets_feature_div li"):
             text = clean_text(li.get_text())
-            text_lower = text.lower()
-
-            if ("nombre de pages" in text_lower or "pages" in text_lower) and not details["pages"]:
-                match = re.search(r"(\d{2,4})\s*pages?", text, re.IGNORECASE)
+            tl = text.lower()
+            if ("nombre de pages" in tl or "pages" in tl) and not details["pages"]:
+                match = re.search(r"(\d{2,4})\s*pages?", text, re.I)
                 if match:
                     details["pages"] = int(match.group(1))
-
-            if ("date de publication" in text_lower or "éditeur" in text_lower) and not details["publication_date"]:
+            if ("date de publication" in tl or "éditeur" in tl) and not details["publication_date"]:
                 match = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\d{4})", text)
                 if match:
                     details["publication_date"] = match.group(1)
-
-            # BSR Amazon.fr — format "#1 dans Cuisine"
-            if ("classement" in text_lower or "meilleure vente" in text_lower) and not details["bsr"]:
-                match = re.search(r"#\s*(\d[\d\s\.]*)\s+dans", text)
-                if not match:
-                    match = re.search(r"n[°o]?\s*(\d[\d\s]*)\s+dans", text, re.IGNORECASE)
+            if ("classement" in tl or "meilleure vente" in tl) and not details["bsr"]:
+                match = re.search(r"#\s*(\d[\d\s\.]*)\s+dans", text) or re.search(r"n[°o]?\s*(\d[\d\s]*)\s+dans", text, re.I)
                 if match:
                     details["bsr"] = int(re.sub(r"[\s\.]", "", match.group(1)))
 
-        # Format 2 : productDetails table
-        rows = soup.select(
-            "#productDetails_detailBullets_sections1 tr, "
-            "#productDetails_techSpec_section_1 tr, "
+        for row in soup.select(
+            "#productDetails_detailBullets_sections1 tr,"
+            "#productDetails_techSpec_section_1 tr,"
             "#productDetails_db_sections tr"
-        )
-        for row in rows:
+        ):
             th = row.select_one("th")
             td = row.select_one("td")
             if not th or not td:
                 continue
             label = clean_text(th.get_text()).lower()
             value = clean_text(td.get_text())
-
             if "pages" in label and not details["pages"]:
                 match = re.search(r"(\d+)", value)
                 if match:
                     details["pages"] = int(match.group(1))
-
             if ("date" in label or "publication" in label) and not details["publication_date"]:
                 details["publication_date"] = value
-
             if ("classement" in label or "best" in label) and not details["bsr"]:
-                match = re.search(r"#\s*(\d[\d\s\.]*)", value)
-                if not match:
-                    match = re.search(r"(\d[\d\s\.]*)", value)
+                match = re.search(r"#\s*(\d[\d\s\.]*)", value) or re.search(r"(\d[\d\s\.]*)", value)
                 if match:
                     details["bsr"] = int(re.sub(r"[\s\.]", "", match.group(1)))
 
     except Exception as e:
-        print(f"    ⚠️ Erreur page produit {product_url}: {e}")
+        print(f"    [PAGE PRODUIT] Erreur {product_url}: {e}")
 
     return details
 
 
 def practical_score(title):
-    title = title.lower()
-    return sum(1 for word in PRACTICAL_KEYWORDS if word in title)
+    return sum(1 for word in PRACTICAL_KEYWORDS if word in title.lower())
 
 
 def analyze_category(category, url, max_books=20):
-    soup = get_soup(url)
-    books = []
+    try:
+        soup = get_soup(url)
+    except Exception as e:
+        print(f"    [ERREUR LISTE] {category}: {e}")
+        return []
 
     items = soup.select("div.zg-grid-general-faceout")
     if not items:
         items = soup.select("div[id^='gridItemRoot']")
 
+    if not items:
+        page_text = soup.get_text().lower()
+        if any(s in page_text for s in BLOCK_SIGNALS):
+            print(f"    [BLOCAGE SILENCIEUX] {category}")
+        else:
+            print(f"    [VIDE] Aucun item pour {category}")
+        return []
+
+    books = []
     for rank, item in enumerate(items[:max_books], start=1):
         title = get_title(item)
         if not title:
             continue
-
-        price = get_price(item)
-        rating = get_rating(item)
-        reviews_count = get_reviews_count(item)
-        product_url = get_product_url(item)
 
         book = {
             "category": category,
             "category_url": url,
             "rank_in_category": rank,
             "title": title,
-            "price": price,
-            "rating": rating,
-            "reviews_count": reviews_count,
-            "product_url": product_url,
+            "price": get_price(item),
+            "rating": get_rating(item),
+            "reviews_count": get_reviews_count(item),
+            "product_url": get_product_url(item),
             "practical": practical_score(title),
-            # Champs page produit — remplis uniquement pour top PRODUCT_PAGE_LIMIT
             "subtitle": "",
             "description": "",
             "publication_date": "",
@@ -415,19 +415,17 @@ def analyze_category(category, url, max_books=20):
             "bsr": None
         }
 
-        # Visite page produit pour le top N
-        if rank <= PRODUCT_PAGE_LIMIT and product_url:
+        if rank <= PRODUCT_PAGE_LIMIT and book["product_url"]:
             print(f"      -> Page produit #{rank}: {title[:50]}...")
-            details = get_product_details(product_url)
-            # Fallback rating/reviews si manquants sur la liste
-            if book["rating"] is None and details.get("rating_page") is not None:
-                book["rating"] = details["rating_page"]
-            if book["reviews_count"] is None and details.get("reviews_count_page") is not None:
-                book["reviews_count"] = details["reviews_count_page"]
-            # Ne pas écraser avec les champs fallback — on garde uniquement les champs enrichis
+            details = get_product_details(book["product_url"])
+            if book["rating"] is None:
+                book["rating"] = details.get("rating_page")
+            if book["reviews_count"] is None:
+                book["reviews_count"] = details.get("reviews_count_page")
             for key in ["subtitle", "description", "publication_date", "pages", "bsr"]:
                 book[key] = details.get(key)
-            time.sleep(0.8)
+            # ── 2. Délai aléatoire page produit ──────────────────────────────
+            time.sleep(random.uniform(1.0, 2.5))
 
         books.append(book)
 
@@ -446,43 +444,30 @@ def compute_scores(df):
         practical=("practical", "sum")
     ).reset_index()
 
-    summary["avg_price"] = summary["avg_price"].fillna(0).round(2)
-    summary["median_price"] = summary["median_price"].fillna(0).round(2)
-    summary["avg_rating"] = summary["avg_rating"].fillna(0).round(2)
+    summary["avg_price"]     = summary["avg_price"].fillna(0).round(2)
+    summary["median_price"]  = summary["median_price"].fillna(0).round(2)
+    summary["avg_rating"]    = summary["avg_rating"].fillna(0).round(2)
     summary["total_reviews"] = summary["total_reviews"].fillna(0).astype(int)
-    summary["avg_reviews"] = summary["avg_reviews"].fillna(0).round(0)
+    summary["avg_reviews"]   = summary["avg_reviews"].fillna(0).round(0)
 
-    summary["price_score"] = summary["avg_price"].apply(
-        lambda x: 0 if x == 0 else min(x * 2, 30)
-    )
-
+    summary["price_score"]    = summary["avg_price"].apply(lambda x: 0 if x == 0 else min(x * 2, 30))
     summary["practical_score"] = summary["practical"] * 4
+    summary["business_score"] = summary["category"].apply(lambda x: 20 if is_business_category(x) else 0)
 
-    summary["business_score"] = summary["category"].apply(
-        lambda x: 20 if is_business_category(x) else 0
+    max_rev = summary["total_reviews"].max()
+    summary["demand_score"]  = summary["total_reviews"].apply(
+        lambda x: round((x / max_rev) * 20, 1) if max_rev > 0 else 0
     )
-
-    # Score demande : basé sur le volume de reviews (proxy de popularité)
-    max_reviews = summary["total_reviews"].max()
-    summary["demand_score"] = summary["total_reviews"].apply(
-        lambda x: round((x / max_reviews) * 20, 1) if max_reviews > 0 else 0
-    )
-
-    # Score qualité marché : note moyenne (entre 0 et 10)
-    summary["quality_score"] = summary["avg_rating"].apply(
-        lambda x: round(x * 2, 1)
-    )
+    summary["quality_score"] = summary["avg_rating"].apply(lambda x: round(x * 2, 1))
 
     summary["kdp_score"] = (
-        summary["price_score"]
-        + summary["practical_score"]
-        + summary["business_score"]
-        + summary["demand_score"]
+        summary["price_score"] + summary["practical_score"]
+        + summary["business_score"] + summary["demand_score"]
         + summary["books"]
     ).round(1)
 
     summary["decision"] = summary["kdp_score"].apply(
-        lambda x: "GO" if x >= 70 else "À surveiller" if x >= 40 else "STOP"
+        lambda x: "GO" if x >= 70 else "A surveiller" if x >= 40 else "STOP"
     )
 
     return summary.sort_values("kdp_score", ascending=False)
@@ -490,9 +475,10 @@ def compute_scores(df):
 
 def main():
     all_books = []
+    categories_done = 0
 
     main_categories = get_main_categories()
-    print(f"Catégories principales détectées : {len(main_categories)}")
+    print(f"Categories principales detectees : {len(main_categories)}")
 
     for main_name, main_url in main_categories:
         if not is_business_category(main_name):
@@ -512,18 +498,27 @@ def main():
 
             try:
                 books = analyze_category(sub_name, sub_url, max_books=20)
-                all_books.extend(books)
-                time.sleep(0.8)
+                if books:
+                    all_books.extend(books)
+                    categories_done += 1
+                    print(f"    -> {len(books)} livres collectes")
+
+                    # ── 5. Sauvegarde toutes les 5 catégories ────────────────
+                    if categories_done % 5 == 0:
+                        save_intermediate(all_books)
+
             except Exception as e:
-                print(f"Erreur sur {sub_name}: {e}")
+                print(f"  [ERREUR] {sub_name}: {e}")
+
+            # ── 2. Délai aléatoire entre sous-catégories ────────────────────
+            time.sleep(random.uniform(1.5, 3.0))
 
     if not all_books:
-        print("Aucune donnée récupérée.")
+        print("Aucune donnee recuperee.")
         return
 
     df = pd.DataFrame(all_books)
-    df = df[df["title"].notna()]
-    df = df[df["title"].str.strip() != ""]
+    df = df[df["title"].notna() & (df["title"].str.strip() != "")]
 
     summary = compute_scores(df)
 
@@ -531,10 +526,18 @@ def main():
         summary.to_excel(writer, sheet_name="scores", index=False)
         df.to_excel(writer, sheet_name="data", index=False)
 
-    print(f"\nTerminé : {OUTPUT_FILE}")
-    print(f"   Catégories : {len(summary)}")
-    print(f"   Livres scrapés : {len(df)}")
-    print(f"   Livres avec page produit : {df['description'].notna().sum()}")
+    try:
+        Path(TEMP_FILE).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    print(f"\nTermine : {OUTPUT_FILE}")
+    print(f"   Categories     : {len(summary)}")
+    print(f"   Livres scrapes : {len(df)}")
+    print(f"   Descriptions   : {df['description'].notna().sum()} / {len(df)}")
+    print(f"   Ratings        : {df['rating'].notna().sum()} / {len(df)}")
+    print(f"   Reviews count  : {df['reviews_count'].notna().sum()} / {len(df)}")
+    print(f"   BSR            : {df['bsr'].notna().sum()} / {len(df)}")
 
 
 if __name__ == "__main__":
