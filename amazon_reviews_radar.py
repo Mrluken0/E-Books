@@ -8,7 +8,7 @@ from pathlib import Path
 
 BASE_URL = "https://www.amazon.fr"
 
-BASE_DIR = Path(r"C:\Users\luken\Desktop\LKN Digital\Automation\KDP-Automation")
+BASE_DIR = Path(r"C:/LKN_Digital/KDP")
 RADAR_FILE = BASE_DIR / "radar_kdp_clean.xlsx"
 OUTPUT_FILE = BASE_DIR / "reviews_radar.xlsx"
 
