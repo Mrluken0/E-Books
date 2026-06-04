@@ -1,4 +1,6 @@
 import sys
+import io
+import os
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -6,8 +8,10 @@ import time
 import re
 import random
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
-sys.stdout.reconfigure(encoding="utf-8")
+os.environ["PYTHONIOENCODING"] = "utf-8"
 
 BASE_URL = "https://www.amazon.fr"
 START_URL = "https://www.amazon.fr/gp/bestsellers/books"
@@ -73,10 +77,20 @@ BLOCK_SIGNALS = [
     "veuillez saisir les caractères", "api-services-support@amazon.com"
 ]
 
+# Locks pour thread-safety
+_print_lock = threading.Lock()
+_save_lock  = threading.Lock()
+
+
+def safe_print(*args, **kwargs):
+    with _print_lock:
+        print(*args, **kwargs, flush=True)
+
 
 def clean_text(text):
     if not text:
         return ""
+    text = re.sub(r"[\u200e\u200f\u202a-\u202e\xa0]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -88,11 +102,10 @@ def get_soup(url, max_retries=3):
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "html.parser")
 
-            # ── 4. Détection blocage Amazon ──────────────────────────────────
             page_text = soup.get_text().lower()
             if any(signal in page_text for signal in BLOCK_SIGNALS):
                 wait = (attempt + 1) * random.uniform(8, 15)
-                print(f"    [BLOCAGE] Amazon bloque. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                safe_print(f"    [BLOCAGE] Amazon bloque. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
                 time.sleep(wait)
                 continue
 
@@ -102,14 +115,14 @@ def get_soup(url, max_retries=3):
             code = e.response.status_code
             if code in (429, 503):
                 wait = (attempt + 1) * random.uniform(5, 10)
-                print(f"    [HTTP {code}] Rate limited. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                safe_print(f"    [HTTP {code}] Rate limited. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
                 time.sleep(wait)
             else:
                 raise
         except requests.exceptions.RequestException as e:
             if attempt < max_retries - 1:
                 wait = (attempt + 1) * random.uniform(3, 6)
-                print(f"    [RESEAU] {e}. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                safe_print(f"    [RESEAU] {e}. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
                 time.sleep(wait)
             else:
                 raise
@@ -117,22 +130,23 @@ def get_soup(url, max_retries=3):
     raise Exception(f"Echec apres {max_retries} tentatives : {url}")
 
 
-# ── 5. Sauvegarde intermédiaire ───────────────────────────────────────────────
+# ── 4. Sauvegarde intermédiaire thread-safe ───────────────────────────────────
 def save_intermediate(all_books):
     if not all_books:
         return
-    try:
-        df = pd.DataFrame(all_books)
-        df = df[df["title"].notna() & (df["title"].str.strip() != "")]
-        if df.empty:
-            return
-        summary = compute_scores(df)
-        with pd.ExcelWriter(TEMP_FILE, engine="openpyxl") as writer:
-            summary.to_excel(writer, sheet_name="scores", index=False)
-            df.to_excel(writer, sheet_name="data", index=False)
-        print(f"    [SAVE] Sauvegarde temp OK ({len(df)} livres, {len(summary)} categories)")
-    except Exception as e:
-        print(f"    [SAVE] Erreur : {e}")
+    with _save_lock:
+        try:
+            df = pd.DataFrame(all_books)
+            df = df[df["title"].notna() & (df["title"].str.strip() != "")]
+            if df.empty:
+                return
+            summary = compute_scores(df)
+            with pd.ExcelWriter(TEMP_FILE, engine="openpyxl") as writer:
+                summary.to_excel(writer, sheet_name="scores", index=False)
+                df.to_excel(writer, sheet_name="data", index=False)
+            safe_print(f"    [SAVE] Sauvegarde temp OK ({len(df)} livres, {len(summary)} categories)")
+        except Exception as e:
+            safe_print(f"    [SAVE] Erreur : {e}")
 
 
 def is_excluded(name):
@@ -328,6 +342,7 @@ def get_product_details(product_url):
         for li in soup.select("#detailBulletsWrapper_feature_div li, #detailBullets_feature_div li"):
             text = clean_text(li.get_text())
             tl = text.lower()
+
             if ("nombre de pages" in tl or "pages" in tl) and not details["pages"]:
                 match = re.search(r"(\d{2,4})\s*pages?", text, re.I)
                 if match:
@@ -336,10 +351,12 @@ def get_product_details(product_url):
                 match = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\d{4})", text)
                 if match:
                     details["publication_date"] = match.group(1)
-            if ("classement" in tl or "meilleure vente" in tl) and not details["bsr"]:
+            if ("classement" in tl or "meilleure vente" in tl or "best sellers rank" in tl or "best seller rank" in tl) and not details["bsr"]:
                 match = re.search(r":\s*([\d\s]+)\s+en\s+", text)
                 if not match:
                     match = re.search(r":\s*([\d\s]+)\s+dans\s+", text)
+                if not match:
+                    match = re.search(r":\s*([\d\s]+)\s+in\s+", text)  # ← anglais
                 if not match:
                     match = re.search(r"n[°o]?\s*(\d[\d\s]*)", text, re.I)
                 if match:
@@ -367,12 +384,14 @@ def get_product_details(product_url):
                 if not match:
                     match = re.search(r":\s*([\d\s]+)\s+dans\s+", value)
                 if not match:
+                    match = re.search(r":\s*([\d\s]+)\s+in\s+", value)  # ← anglais
+                if not match:
                     match = re.search(r"n[°o]?\s*(\d[\d\s]*)", value, re.I)
                 if match:
                     details["bsr"] = int(re.sub(r"\s", "", match.group(1)))
 
     except Exception as e:
-        print(f"    [PAGE PRODUIT] Erreur {product_url}: {e}")
+        safe_print(f"    [PAGE PRODUIT] Erreur {product_url}: {e}")
 
     return details
 
@@ -385,7 +404,7 @@ def analyze_category(category, url, max_books=20):
     try:
         soup = get_soup(url)
     except Exception as e:
-        print(f"    [ERREUR LISTE] {category}: {e}")
+        safe_print(f"    [ERREUR LISTE] {category}: {e}")
         return []
 
     items = soup.select("div.zg-grid-general-faceout")
@@ -395,9 +414,9 @@ def analyze_category(category, url, max_books=20):
     if not items:
         page_text = soup.get_text().lower()
         if any(s in page_text for s in BLOCK_SIGNALS):
-            print(f"    [BLOCAGE SILENCIEUX] {category}")
+            safe_print(f"    [BLOCAGE SILENCIEUX] {category}")
         else:
-            print(f"    [VIDE] Aucun item pour {category}")
+            safe_print(f"    [VIDE] Aucun item pour {category}")
         return []
 
     books = []
@@ -424,7 +443,7 @@ def analyze_category(category, url, max_books=20):
         }
 
         if rank <= PRODUCT_PAGE_LIMIT and book["product_url"]:
-            print(f"      -> Page produit #{rank}: {title[:50]}...")
+            safe_print(f"      -> Page produit #{rank}: {title[:50]}...")
             details = get_product_details(book["product_url"])
             if book["rating"] is None:
                 book["rating"] = details.get("rating_page")
@@ -432,16 +451,30 @@ def analyze_category(category, url, max_books=20):
                 book["reviews_count"] = details.get("reviews_count_page")
             for key in ["subtitle", "description", "publication_date", "pages", "bsr"]:
                 book[key] = details.get(key)
-            time.sleep(random.uniform(1.0, 2.5))
+            # ── Délai réduit entre pages produit ─────────────────────────────
+            time.sleep(random.uniform(0.8, 1.5))
 
         books.append(book)
 
     return books
 
 
+# ── Wrapper pour ThreadPoolExecutor ──────────────────────────────────────────
+def process_subcategory(args):
+    sub_name, sub_url = args
+    safe_print(f"  SUB: {sub_name}")
+    try:
+        books = analyze_category(sub_name, sub_url, max_books=20)
+        if books:
+            safe_print(f"    -> {len(books)} livres collectes")
+        return books
+    except Exception as e:
+        safe_print(f"  [ERREUR] {sub_name}: {e}")
+        return []
+
+
 # ── SCORING NORMALISÉ ────────────────────────────────────────────────────────
 def compute_scores(df):
-    # Déduplication pour le scoring : un livre ne compte qu'une fois
     df_unique = df.drop_duplicates(subset=["product_url"], keep="first")
 
     summary = df_unique.groupby("category").agg(
@@ -461,34 +494,28 @@ def compute_scores(df):
     summary["total_reviews"] = summary["total_reviews"].fillna(0).astype(int)
     summary["avg_reviews"]   = summary["avg_reviews"].fillna(0).round(0)
 
-    # Price score : borné 0-25, linéaire jusqu'à 20€
     summary["price_score"] = summary["avg_price"].apply(
         lambda x: round(min((x / 20) * 25, 25), 1) if x > 0 else 0
     )
 
-    # Practical score : normalisé 0-20
     max_prac = summary["practical"].max()
     summary["practical_score"] = summary["practical"].apply(
         lambda x: round((x / max_prac) * 20, 1) if max_prac > 0 else 0
     )
 
-    # Business score : 20 si catégorie business
     summary["business_score"] = summary["category"].apply(
         lambda x: 20 if is_business_category(x) else 0
     )
 
-    # Demand score : normalisé 0-25
     max_rev = summary["total_reviews"].max()
     summary["demand_score"] = summary["total_reviews"].apply(
         lambda x: round((x / max_rev) * 25, 1) if max_rev > 0 else 0
     )
 
-    # Quality score : normalisé 0-10
     summary["quality_score"] = summary["avg_rating"].apply(
         lambda x: round((x / 5) * 10, 1)
     )
 
-    # kdp_score : max théorique 100
     summary["kdp_score"] = (
         summary["price_score"] + summary["practical_score"]
         + summary["business_score"] + summary["demand_score"]
@@ -507,47 +534,47 @@ def main():
     categories_done = 0
 
     main_categories = get_main_categories()
-    print(f"Categories principales detectees : {len(main_categories)}")
+    safe_print(f"Categories principales detectees : {len(main_categories)}")
 
     for main_name, main_url in main_categories:
         if not is_business_category(main_name):
             continue
 
-        print(f"MAIN: {main_name}")
+        safe_print(f"MAIN: {main_name}")
 
         subcategories = get_subcategories(main_url)
         if not subcategories:
             subcategories = [(main_name, main_url)]
 
-        for sub_name, sub_url in subcategories:
-            if not is_business_category(sub_name):
-                continue
+        subs_to_process = [
+            (sub_name, sub_url)
+            for sub_name, sub_url in subcategories
+            if is_business_category(sub_name)
+        ]
 
-            print(f"  SUB: {sub_name}")
-
-            try:
-                books = analyze_category(sub_name, sub_url, max_books=20)
+        # ── Parallélisme limité : 2 sous-catégories simultanées ──────────────
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {
+                executor.submit(process_subcategory, args): args[0]
+                for args in subs_to_process
+            }
+            for future in as_completed(futures):
+                books = future.result()
                 if books:
                     all_books.extend(books)
                     categories_done += 1
-                    print(f"    -> {len(books)} livres collectes")
-
                     if categories_done % 5 == 0:
                         save_intermediate(all_books)
 
-            except Exception as e:
-                print(f"  [ERREUR] {sub_name}: {e}")
-
-            time.sleep(random.uniform(1.5, 3.0))
+        # ── Délai réduit entre catégories principales ────────────────────────
+        time.sleep(random.uniform(1.0, 2.0))
 
     if not all_books:
-        print("Aucune donnee recuperee.")
+        safe_print("Aucune donnee recuperee.")
         return
 
     df = pd.DataFrame(all_books)
     df = df[df["title"].notna() & (df["title"].str.strip() != "")]
-
-    # ── Déduplication doublons intra-data ────────────────────────────────────
     df_dedup = df.drop_duplicates(subset=["title", "category"], keep="first")
 
     summary = compute_scores(df_dedup)
@@ -561,13 +588,13 @@ def main():
     except Exception:
         pass
 
-    print(f"\nTermine : {OUTPUT_FILE}")
-    print(f"   Categories     : {len(summary)}")
-    print(f"   Livres scrapes : {len(df_dedup)} (brut : {len(df)}, doublons supprimes : {len(df) - len(df_dedup)})")
-    print(f"   Descriptions   : {df_dedup['description'].notna().sum()} / {len(df_dedup)}")
-    print(f"   Ratings        : {df_dedup['rating'].notna().sum()} / {len(df_dedup)}")
-    print(f"   Reviews count  : {df_dedup['reviews_count'].notna().sum()} / {len(df_dedup)}")
-    print(f"   BSR            : {df_dedup['bsr'].notna().sum()} / {len(df_dedup)}")
+    safe_print(f"\nTermine : {OUTPUT_FILE}")
+    safe_print(f"   Categories     : {len(summary)}")
+    safe_print(f"   Livres scrapes : {len(df_dedup)} (brut : {len(df)}, doublons supprimes : {len(df) - len(df_dedup)})")
+    safe_print(f"   Descriptions   : {df_dedup['description'].notna().sum()} / {len(df_dedup)}")
+    safe_print(f"   Ratings        : {df_dedup['rating'].notna().sum()} / {len(df_dedup)}")
+    safe_print(f"   Reviews count  : {df_dedup['reviews_count'].notna().sum()} / {len(df_dedup)}")
+    safe_print(f"   BSR            : {df_dedup['bsr'].notna().sum()} / {len(df_dedup)}")
 
 
 if __name__ == "__main__":
