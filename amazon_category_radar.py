@@ -432,7 +432,6 @@ def analyze_category(category, url, max_books=20):
                 book["reviews_count"] = details.get("reviews_count_page")
             for key in ["subtitle", "description", "publication_date", "pages", "bsr"]:
                 book[key] = details.get(key)
-            # ── 2. Délai aléatoire page produit ──────────────────────────────
             time.sleep(random.uniform(1.0, 2.5))
 
         books.append(book)
@@ -440,8 +439,12 @@ def analyze_category(category, url, max_books=20):
     return books
 
 
+# ── SCORING NORMALISÉ ────────────────────────────────────────────────────────
 def compute_scores(df):
-    summary = df.groupby("category").agg(
+    # Déduplication pour le scoring : un livre ne compte qu'une fois
+    df_unique = df.drop_duplicates(subset=["product_url"], keep="first")
+
+    summary = df_unique.groupby("category").agg(
         url=("category_url", "first"),
         books=("title", "count"),
         avg_price=("price", "mean"),
@@ -458,20 +461,38 @@ def compute_scores(df):
     summary["total_reviews"] = summary["total_reviews"].fillna(0).astype(int)
     summary["avg_reviews"]   = summary["avg_reviews"].fillna(0).round(0)
 
-    summary["price_score"]    = summary["avg_price"].apply(lambda x: 0 if x == 0 else min(x * 2, 30))
-    summary["practical_score"] = summary["practical"] * 4
-    summary["business_score"] = summary["category"].apply(lambda x: 20 if is_business_category(x) else 0)
-
-    max_rev = summary["total_reviews"].max()
-    summary["demand_score"]  = summary["total_reviews"].apply(
-        lambda x: round((x / max_rev) * 20, 1) if max_rev > 0 else 0
+    # Price score : borné 0-25, linéaire jusqu'à 20€
+    summary["price_score"] = summary["avg_price"].apply(
+        lambda x: round(min((x / 20) * 25, 25), 1) if x > 0 else 0
     )
-    summary["quality_score"] = summary["avg_rating"].apply(lambda x: round(x * 2, 1))
 
+    # Practical score : normalisé 0-20
+    max_prac = summary["practical"].max()
+    summary["practical_score"] = summary["practical"].apply(
+        lambda x: round((x / max_prac) * 20, 1) if max_prac > 0 else 0
+    )
+
+    # Business score : 20 si catégorie business
+    summary["business_score"] = summary["category"].apply(
+        lambda x: 20 if is_business_category(x) else 0
+    )
+
+    # Demand score : normalisé 0-25
+    max_rev = summary["total_reviews"].max()
+    summary["demand_score"] = summary["total_reviews"].apply(
+        lambda x: round((x / max_rev) * 25, 1) if max_rev > 0 else 0
+    )
+
+    # Quality score : normalisé 0-10
+    summary["quality_score"] = summary["avg_rating"].apply(
+        lambda x: round((x / 5) * 10, 1)
+    )
+
+    # kdp_score : max théorique 100
     summary["kdp_score"] = (
         summary["price_score"] + summary["practical_score"]
         + summary["business_score"] + summary["demand_score"]
-        + summary["books"]
+        + summary["quality_score"]
     ).round(1)
 
     summary["decision"] = summary["kdp_score"].apply(
@@ -511,14 +532,12 @@ def main():
                     categories_done += 1
                     print(f"    -> {len(books)} livres collectes")
 
-                    # ── 5. Sauvegarde toutes les 5 catégories ────────────────
                     if categories_done % 5 == 0:
                         save_intermediate(all_books)
 
             except Exception as e:
                 print(f"  [ERREUR] {sub_name}: {e}")
 
-            # ── 2. Délai aléatoire entre sous-catégories ────────────────────
             time.sleep(random.uniform(1.5, 3.0))
 
     if not all_books:
@@ -528,11 +547,14 @@ def main():
     df = pd.DataFrame(all_books)
     df = df[df["title"].notna() & (df["title"].str.strip() != "")]
 
-    summary = compute_scores(df)
+    # ── Déduplication doublons intra-data ────────────────────────────────────
+    df_dedup = df.drop_duplicates(subset=["title", "category"], keep="first")
+
+    summary = compute_scores(df_dedup)
 
     with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
         summary.to_excel(writer, sheet_name="scores", index=False)
-        df.to_excel(writer, sheet_name="data", index=False)
+        df_dedup.to_excel(writer, sheet_name="data", index=False)
 
     try:
         Path(TEMP_FILE).unlink(missing_ok=True)
@@ -541,11 +563,11 @@ def main():
 
     print(f"\nTermine : {OUTPUT_FILE}")
     print(f"   Categories     : {len(summary)}")
-    print(f"   Livres scrapes : {len(df)}")
-    print(f"   Descriptions   : {df['description'].notna().sum()} / {len(df)}")
-    print(f"   Ratings        : {df['rating'].notna().sum()} / {len(df)}")
-    print(f"   Reviews count  : {df['reviews_count'].notna().sum()} / {len(df)}")
-    print(f"   BSR            : {df['bsr'].notna().sum()} / {len(df)}")
+    print(f"   Livres scrapes : {len(df_dedup)} (brut : {len(df)}, doublons supprimes : {len(df) - len(df_dedup)})")
+    print(f"   Descriptions   : {df_dedup['description'].notna().sum()} / {len(df_dedup)}")
+    print(f"   Ratings        : {df_dedup['rating'].notna().sum()} / {len(df_dedup)}")
+    print(f"   Reviews count  : {df_dedup['reviews_count'].notna().sum()} / {len(df_dedup)}")
+    print(f"   BSR            : {df_dedup['bsr'].notna().sum()} / {len(df_dedup)}")
 
 
 if __name__ == "__main__":
