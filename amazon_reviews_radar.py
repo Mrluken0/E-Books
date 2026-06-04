@@ -3,20 +3,32 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import time
 import re
+import random
 from datetime import datetime
 from pathlib import Path
 
 BASE_URL = "https://www.amazon.fr"
 
-BASE_DIR = Path(r"C:/LKN_Digital/KDP")
+BASE_DIR = Path(r"C:\Users\luken\Desktop\LKN Digital\Automation\KDP-Automation")
 RADAR_FILE = BASE_DIR / "radar_kdp_clean.xlsx"
 OUTPUT_FILE = BASE_DIR / "reviews_radar.xlsx"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8"
-}
+# ── 1. Rotation User-Agent ────────────────────────────────────────────────────
+UA_LIST = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+]
+
+BLOCK_SIGNALS = [
+    "robot check", "captcha", "enter the characters you see below",
+    "sorry, we just need to make sure you're not a robot",
+    "veuillez saisir les caractères", "api-services-support@amazon.com"
+]
 
 # Nombre de bestsellers par niche dont on scrape les reviews
 TOP_BOOKS_PER_NICHE = 5
@@ -37,14 +49,59 @@ def clean_text(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def get_soup(url):
-    response = requests.get(url, headers=HEADERS, timeout=20)
-    response.raise_for_status()
-    return BeautifulSoup(response.text, "html.parser")
+# ── 2. Headers complets avec rotation ────────────────────────────────────────
+def get_headers():
+    return {
+        "User-Agent": random.choice(UA_LIST),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Cache-Control": "max-age=0",
+    }
+
+
+# ── 3. get_soup avec retry x3 ────────────────────────────────────────────────
+def get_soup(url, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=get_headers(), timeout=25)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            page_text = soup.get_text().lower()
+            if any(signal in page_text for signal in BLOCK_SIGNALS):
+                wait = (attempt + 1) * random.uniform(8, 15)
+                print(f"    [BLOCAGE] Amazon bloque. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                time.sleep(wait)
+                continue
+
+            return soup
+
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code
+            if code in (429, 503):
+                wait = (attempt + 1) * random.uniform(5, 10)
+                print(f"    [HTTP {code}] Rate limited. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                time.sleep(wait)
+            else:
+                raise
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries - 1:
+                wait = (attempt + 1) * random.uniform(3, 6)
+                print(f"    [RESEAU] {e}. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                time.sleep(wait)
+            else:
+                raise
+
+    raise Exception(f"Echec apres {max_retries} tentatives : {url}")
 
 
 def extract_asin(product_url):
-    """Extrait l'ASIN depuis une URL produit Amazon."""
     if not product_url:
         return None
     match = re.search(r"/dp/([A-Z0-9]{10})", str(product_url))
@@ -57,7 +114,6 @@ def extract_asin(product_url):
 
 
 def build_reviews_url(asin, star_filter, page=1):
-    """Construit l'URL de la page reviews avec filtre étoiles."""
     return (
         f"{BASE_URL}/product-reviews/{asin}/"
         f"?sortBy=recent&filterByStar={star_filter}&pageNumber={page}"
@@ -65,7 +121,6 @@ def build_reviews_url(asin, star_filter, page=1):
 
 
 def parse_rating_from_text(text):
-    """Extrait la note numérique depuis un texte type '2,0 sur 5 étoiles'."""
     if not text:
         return None
     match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", text)
@@ -75,10 +130,6 @@ def parse_rating_from_text(text):
 
 
 def scrape_reviews_page(asin, star_filter, page=1):
-    """
-    Scrape une page de reviews filtrées par étoiles.
-    Retourne une liste de dicts {rating, title, body, date}.
-    """
     url = build_reviews_url(asin, star_filter, page)
     reviews = []
 
@@ -87,7 +138,6 @@ def scrape_reviews_page(asin, star_filter, page=1):
         review_items = soup.select("div[data-hook='review']")
 
         for item in review_items:
-            # Note
             rating = None
             rating_el = item.select_one("i[data-hook='review-star-rating'] span.a-icon-alt")
             if not rating_el:
@@ -95,7 +145,6 @@ def scrape_reviews_page(asin, star_filter, page=1):
             if rating_el:
                 rating = parse_rating_from_text(rating_el.get_text())
 
-            # Titre
             title = ""
             title_el = item.select_one("a[data-hook='review-title'] span:not(.a-icon-alt)")
             if not title_el:
@@ -103,7 +152,6 @@ def scrape_reviews_page(asin, star_filter, page=1):
             if title_el:
                 title = clean_text(title_el.get_text())
 
-            # Corps
             body = ""
             body_el = item.select_one("span[data-hook='review-body'] span")
             if not body_el:
@@ -111,13 +159,12 @@ def scrape_reviews_page(asin, star_filter, page=1):
             if body_el:
                 body = clean_text(body_el.get_text())
 
-            # Date
             date = ""
             date_el = item.select_one("span[data-hook='review-date']")
             if date_el:
                 date = clean_text(date_el.get_text())
 
-            if body:  # on garde uniquement les reviews avec contenu
+            if body:
                 reviews.append({
                     "rating": rating,
                     "review_title": title,
@@ -126,16 +173,12 @@ def scrape_reviews_page(asin, star_filter, page=1):
                 })
 
     except Exception as e:
-        print(f"      ⚠️ Erreur scrape reviews (ASIN {asin}, filtre {star_filter}, p{page}): {e}")
+        print(f"      [ERREUR] Reviews ASIN {asin}, filtre {star_filter}, p{page}: {e}")
 
     return reviews
 
 
 def scrape_book_reviews(asin, book_title, max_per_filter=MAX_REVIEWS_PER_FILTER):
-    """
-    Scrape les reviews 1-3 étoiles d'un livre.
-    Retourne une liste consolidée de reviews.
-    """
     all_reviews = []
 
     for star_filter in STAR_FILTERS:
@@ -150,9 +193,10 @@ def scrape_book_reviews(asin, book_title, max_per_filter=MAX_REVIEWS_PER_FILTER)
 
             collected.extend(reviews)
             page += 1
-            time.sleep(0.6)
+            # ── Délai aléatoire entre pages ──────────────────────────────────
+            time.sleep(random.uniform(0.8, 1.8))
 
-            if page > 3:  # max 3 pages par filtre
+            if page > 3:
                 break
 
         collected = collected[:max_per_filter]
@@ -163,19 +207,13 @@ def scrape_book_reviews(asin, book_title, max_per_filter=MAX_REVIEWS_PER_FILTER)
 
 
 def extract_pain_points(reviews_df):
-    """
-    Génère un résumé structuré des points négatifs par niche.
-    Utilisé comme input enrichi pour le Module 7.
-    """
     if reviews_df.empty:
         return ""
 
     bodies = reviews_df["review_body"].dropna().tolist()
-    combined = " | ".join(bodies[:30])  # cap à 30 reviews pour le résumé
-
-    # Nettoyage basique
+    combined = " | ".join(bodies[:30])
     combined = re.sub(r"\s+", " ", combined).strip()
-    return combined[:3000]  # cap à 3000 chars pour le prompt IA
+    return combined[:3000]
 
 
 def main():
@@ -184,7 +222,6 @@ def main():
     df_scores = pd.read_excel(RADAR_FILE, sheet_name="scores")
     df_data = pd.read_excel(RADAR_FILE, sheet_name="data")
 
-    # Filtrer les niches pertinentes
     df_go = df_scores[df_scores["kdp_score"] >= MIN_KDP_SCORE].copy()
     print(f"Niches retenues (score >= {MIN_KDP_SCORE}) : {len(df_go)}")
 
@@ -195,10 +232,8 @@ def main():
         category = niche_row["category"]
         print(f"\nNiche : {category}")
 
-        # Récupérer les top livres de cette niche
         df_books = df_data[df_data["category"] == category].copy()
 
-        # Trier par rang si disponible, sinon prendre les premiers
         if "rank_in_category" in df_books.columns:
             df_books = df_books.sort_values("rank_in_category")
 
@@ -212,7 +247,7 @@ def main():
             asin = extract_asin(product_url)
 
             if not asin:
-                print(f"  ⚠️ ASIN introuvable pour : {title[:50]}")
+                print(f"  [ASIN MANQUANT] {title[:60]}")
                 continue
 
             print(f"  Livre : {title[:60]}...")
@@ -231,9 +266,9 @@ def main():
             niche_reviews.extend(reviews)
             all_reviews.extend(reviews)
 
-            time.sleep(1.0)
+            # ── Délai aléatoire entre livres ─────────────────────────────────
+            time.sleep(random.uniform(1.5, 3.0))
 
-        # Résumé pain points par niche
         if niche_reviews:
             niche_df = pd.DataFrame(niche_reviews)
             pain_points = extract_pain_points(niche_df)
@@ -247,9 +282,9 @@ def main():
                 "pain_points_raw": pain_points
             })
 
-            print(f"  → {len(niche_reviews)} reviews collectées")
+            print(f"  -> {len(niche_reviews)} reviews collectées")
         else:
-            print(f"  → Aucune review collectée")
+            print(f"  -> Aucune review collectée")
 
     if not all_reviews:
         print("\nAucune review récupérée.")
@@ -258,7 +293,6 @@ def main():
     df_reviews = pd.DataFrame(all_reviews)
     df_summaries = pd.DataFrame(niche_summaries)
 
-    # Réorganiser les colonnes
     review_cols = [
         "category", "book_title", "asin", "product_url",
         "rating", "review_title", "review_body", "review_date"
@@ -270,7 +304,7 @@ def main():
         df_summaries.to_excel(writer, sheet_name="pain_points", index=False)
         df_reviews.to_excel(writer, sheet_name="reviews_detail", index=False)
 
-    print(f"\n✅ Terminé : {OUTPUT_FILE}")
+    print(f"\nTermine : {OUTPUT_FILE}")
     print(f"   Niches analysées    : {len(df_summaries)}")
     print(f"   Reviews collectées  : {len(df_reviews)}")
 
