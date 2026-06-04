@@ -8,7 +8,7 @@ from datetime import datetime
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-BASE_DIR = Path(r"C:\Users\luken\Desktop\LKN Digital\Automation\KDP-Automation")
+BASE_DIR = Path(r"C:/LKN_Digital/KDP")
 RADAR_FILE = BASE_DIR / "radar_kdp_clean.xlsx"
 OUTPUT_DIR = BASE_DIR / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
