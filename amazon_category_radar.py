@@ -12,8 +12,8 @@ sys.stdout.reconfigure(encoding="utf-8")
 BASE_URL = "https://www.amazon.fr"
 START_URL = "https://www.amazon.fr/gp/bestsellers/books"
 
-OUTPUT_FILE = r"C:\Users\luken\Desktop\LKN Digital\Automation\KDP-Automation\radar_kdp_clean.xlsx"
-TEMP_FILE   = r"C:\Users\luken\Desktop\LKN Digital\Automation\KDP-Automation\radar_kdp_temp.xlsx"
+OUTPUT_FILE = r"C:/LKN_Digital/KDP/radar_kdp_clean.xlsx"
+TEMP_FILE   = r"C:/LKN_Digital/KDP/radar_kdp_temp.xlsx"
 
 # ── 1. Rotation User-Agent ────────────────────────────────────────────────────
 UA_LIST = [
@@ -336,12 +336,12 @@ def get_product_details(product_url):
                 match = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\d{4})", text)
                 if match:
                     details["publication_date"] = match.group(1)
-            if ("classement" in label or "best" in label) and not details["bsr"]:
-                match = re.search(r":\s*([\d\s]+)\s+en\s+", value)
+            if ("classement" in tl or "meilleure vente" in tl) and not details["bsr"]:
+                match = re.search(r":\s*([\d\s]+)\s+en\s+", text)
                 if not match:
-                    match = re.search(r":\s*([\d\s]+)\s+dans\s+", value)
+                    match = re.search(r":\s*([\d\s]+)\s+dans\s+", text)
                 if not match:
-                    match = re.search(r"n[°o]?\s*(\d[\d\s]*)", value, re.I)
+                    match = re.search(r"n[°o]?\s*(\d[\d\s]*)", text, re.I)
                 if match:
                     details["bsr"] = int(re.sub(r"\s", "", match.group(1)))
 
@@ -354,18 +354,22 @@ def get_product_details(product_url):
             td = row.select_one("td")
             if not th or not td:
                 continue
-            label = clean_text(th.get_text()).lower()
+            col_label = clean_text(th.get_text()).lower()
             value = clean_text(td.get_text())
-            if "pages" in label and not details["pages"]:
+            if "pages" in col_label and not details["pages"]:
                 match = re.search(r"(\d+)", value)
                 if match:
                     details["pages"] = int(match.group(1))
-            if ("date" in label or "publication" in label) and not details["publication_date"]:
+            if ("date" in col_label or "publication" in col_label) and not details["publication_date"]:
                 details["publication_date"] = value
-            if ("classement" in label or "best" in label) and not details["bsr"]:
-                match = re.search(r"#\s*(\d[\d\s\.]*)", value) or re.search(r"(\d[\d\s\.]*)", value)
+            if ("classement" in col_label or "best" in col_label) and not details["bsr"]:
+                match = re.search(r":\s*([\d\s]+)\s+en\s+", value)
+                if not match:
+                    match = re.search(r":\s*([\d\s]+)\s+dans\s+", value)
+                if not match:
+                    match = re.search(r"n[°o]?\s*(\d[\d\s]*)", value, re.I)
                 if match:
-                    details["bsr"] = int(re.sub(r"[\s\.]", "", match.group(1)))
+                    details["bsr"] = int(re.sub(r"\s", "", match.group(1)))
 
     except Exception as e:
         print(f"    [PAGE PRODUIT] Erreur {product_url}: {e}")
