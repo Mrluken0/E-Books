@@ -1,11 +1,19 @@
 {
   "Claude" : {
-  "url": "https://claude.ai/new",
-  "selector": "div[data-testid='chat-input']",
-  "submit_selector": "button[type='submit']",
-  "submit_key": "Enter",
-  "wait_before_type": 3.0,
-  "type_delay": 0,
-  "headless": false
+    "url": "https://claude.ai/new",
+    "selector": "div[data-testid='chat-input']",
+    "submit_selector": "button[type='submit']",
+    "submit_key": "Enter",
+    "wait_before_type": 3.0,
+    "type_delay": 0,
+    "headless": false
+  },
+  "ChatGPT": {
+    "url": "https://chatgpt.com",
+    "selector": "Vide",
+    "submit_key": "Enter",
+    "wait_before_type": 3.0,
+    "type_delay": 0,
+    "headless": false
   }
 }
