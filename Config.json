@@ -1,9 +1,9 @@
 {
-  "url": "https://ton-site.com",
-  "selector": "textarea#prompt",
+  "url": "https://claude.ai/new",
+  "selector": "div[data-testid='chat-input']",
   "submit_selector": "button[type='submit']",
-  "submit_key": null,
-  "wait_before_type": 2.0,
+  "submit_key": "Enter",
+  "wait_before_type": 3.0,
   "type_delay": 0,
   "headless": false
 }
