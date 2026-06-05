@@ -84,22 +84,14 @@ def send_prompt(config, prompt_text):
         # Clic sur la zone de texte
         page.click(selector)
         time.sleep(0.3)
+        page.evaluate(f"""
+            const el = document.querySelector('{selector}');
+            if (el) {{
+                el.focus();
+                document.execCommand('insertText', false, {json.dumps(prompt_text)});
+            }}
+        """)
 
-        # Saisie du prompt
-        if type_delay > 0:
-            print(f"[INFO] Saisie en cours (délai {type_delay}ms/car)...")
-            page.type(selector, prompt_text, delay=type_delay)
-        else:
-            print(f"[INFO] Saisie instantanée...")
-            page.keyboard.press("Control+a")
-            # Pour les zones contenteditable, utiliser clipboard
-            page.evaluate(f"""
-                const el = document.querySelector('{selector}');
-                if (el) {{
-                    el.focus();
-                    document.execCommand('insertText', false, {json.dumps(prompt_text)});
-                }}
-            """)
 
         print(f"[OK] Prompt inséré")
 
