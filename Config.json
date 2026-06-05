@@ -1,4 +1,5 @@
 {
+  "Claude" : {
   "url": "https://claude.ai/new",
   "selector": "div[data-testid='chat-input']",
   "submit_selector": "button[type='submit']",
@@ -6,4 +7,5 @@
   "wait_before_type": 3.0,
   "type_delay": 0,
   "headless": false
+  }
 }
