@@ -6,7 +6,8 @@
     "submit_key": "Enter",
     "wait_before_type": 3.0,
     "type_delay": 0,
-    "headless": false
+    "headless": false,
+    "api": false
   },
   "ChatGPT": {
     "url": "https://chatgpt.com",
@@ -14,6 +15,7 @@
     "submit_key": "Enter",
     "wait_before_type": 3.0,
     "type_delay": 0,
-    "headless": false
+    "headless": false,
+    "api" : false
   }
 }
