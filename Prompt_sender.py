@@ -74,12 +74,6 @@ def wait_for_response(page, selectors, timeout=120):
         "out of messages", "prochaine disponibilité", "erreur de connexion"
     ]
     
-    # Mots-clés qui indiquent que l'IA est en train de chercher ou réfléchir
-    loading_keywords = [
-        "recherche en cours", "recherche sur le web", "searching", 
-        "thinking", "en cours", "analysing"
-    ]
-    
     assistant_sel = selectors.get("assistant_message", ".font-claude-response-body")
     
     start_time = time.time()
@@ -106,68 +100,68 @@ def wait_for_response(page, selectors, timeout=120):
 
     print("[INFO] Réponse détectée. Capture du texte en cours...", flush=True)
     
-    # 2. Capture et stabilisation du texte
+    # 2. Capture basée sur l'activité de la page (Animation / Bouton Stop)
     last_text = ""
     stable_count = 0
     
     while time.time() - start_time < timeout:
+        # Sécurité : vérifier si Claude a fini de générer en regardant les boutons de l'interface
+        # Tant que le bouton de stop [aria-label="Stop generating"] ou [aria-label="Interrompre"] existe, l'animation tourne
+        is_generating = page.evaluate("""
+            (() => {
+                // On cherche le bouton d'arrêt de génération de Claude
+                const stopBtn = document.querySelector('button[aria-label*="Stop" i], button[aria-label*="Interrompre" i], button[aria-label*="pause" i]');
+                if (stopBtn) return true;
+                
+                # Sécurité secondaire : Est-ce qu'on voit une icône de chargement/spinning ?
+                const spinner = document.querySelector('.animate-spin, [class*="loading" i]');
+                if (spinner) return true;
+                
+                return false;
+            })()
+        """)
+        
         current_text = page.evaluate(f"""
             (() => {{
-                // 1. On cible le CONTENEUR global du dernier message de l'assistant (prend tout le texte d'un coup)
                 let containers = document.querySelectorAll('[data-testid="assistant-message"], .font-claude-response');
                 if (containers.length > 0 && containers[containers.length - 1].innerText.trim() !== "") {{
                     return containers[containers.length - 1].innerText;
                 }}
-                
-                // 2. Sécurité : si le conteneur principal n'est pas détecté, on utilise le sélecteur du JSON
-                let bodies = document.querySelectorAll({json.dumps(assistant_sel)});
-                if (bodies.length > 0 && bodies[bodies.length - 1].innerText.trim() !== "") {{
-                    return bodies[bodies.length - 1].innerText;
-                }}
-                
                 return "";
             }})()
         """)
         
-        text_lower = current_text.lower() if current_text else ""
-        
-        # Sécurité : On considère que c'est un écran de chargement UNIQUEMENT si le texte est très court
-        # Cela évite de bloquer le script quand la recherche reste affichée en haut de la vraie réponse
-        is_still_loading = len(current_text) < 150 and any(k in text_lower for k in loading_keywords)
-        
-        if current_text and current_text == last_text and not is_still_loading:
-            stable_count += 1
-            if stable_count >= 4: # 1 seconde de stabilité hors chargement
-                break
-        else:
+        # Si le site dit qu'il génère encore, on refuse de s'arrêter, peu importe si le texte est figé
+        if is_generating:
             stable_count = 0
             if current_text:
                 last_text = current_text
-                
+        else:
+            # Si le bouton stop a disparu, on applique une mini-sécurité de stabilité (0.5 seconde)
+            if current_text and current_text == last_text:
+                stable_count += 1
+                if stable_count >= 2: 
+                    break
+            else:
+                stable_count = 0
+                if current_text:
+                    last_text = current_text
+                    
         time.sleep(0.25)
 
     final_text = last_text.strip()
     
-    # --- NETTOYAGE DES ARTEFACTS DE RECHERCHE WEB ---
+    # Nettoyage rapide des artefacts sur les premières lignes
     if final_text:
-        # Liste exacte des phrases magiques à supprimer si elles sont isolées sur une ligne
-        artifacts = ["web recherché", "web searched", "recherche en cours", "en cours"]
-        
         lines = final_text.split("\n")
         cleaned_lines = []
-        
         for line in lines:
-            # Si la ligne nettoyée correspond à un artefact, on la zappe
-            if line.strip().lower() in artifacts:
+            if any(k in line.strip().lower() for k in ["web recherché", "web searched", "recherche en cours"]):
                 continue
             cleaned_lines.append(line)
-            
-        # Reconstitution du texte propre
         final_text = "\n".join(cleaned_lines).strip()
-    # ------------------------------------------------
     
     return final_text if final_text else None
-
 
 def save_html_debug(page):
     """Sauvegarde le HTML de la page pour analyse."""
