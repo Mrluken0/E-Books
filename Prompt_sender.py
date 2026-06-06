@@ -66,55 +66,84 @@ def insert_text_prosemirror(page, selector, text):
         """)
 
 
-def wait_for_response(page, response_selector="[data-is-streaming]", timeout=120):
-    """
-    Attend le début puis la fin du streaming.
-    Retourne le texte de la réponse ou None si vide/timeout.
-    """
-    print("[INFO] Attente du début de la réponse...", flush=True)
-
-    # Attendre que le streaming commence (max 15s)
-    for _ in range(30):
-        if page.query_selector(response_selector):
+def wait_for_response(page, selectors, timeout=120):
+    print("[INFO] Attente du démarrage de la réponse...", flush=True)
+    
+    error_keywords = [
+        "limite atteinte", "reached your usage limit", "try again after", 
+        "out of messages", "prochaine disponibilité", "erreur de connexion"
+    ]
+    
+    # On récupère le sélecteur du JSON (avec notre fallback en secours au cas où)
+    assistant_sel = selectors.get("assistant_message", ".font-claude-response-body")
+    
+    start_time = time.time()
+    started = False
+    
+    # 1. Attendre le chargement initial de la conversation
+    while time.time() - start_time < 20:
+        page_text = page.inner_text("body").lower()
+        for keyword in error_keywords:
+            if keyword in page_text:
+                print(f"\n[BLOQUAGE CRITIQUE] Limite atteinte : '{keyword}'", flush=True)
+                sys.exit(1)
+        
+        has_response = page.locator(assistant_sel).count() > 0
+        if "/chat/" in page.url or has_response:
+            started = True
             break
+            
         time.sleep(0.5)
-    else:
+        
+    if not started:
+        print("[WARN] Claude n'a pas démarré (aucun élément de réponse trouvé).", flush=True)
         return None
 
-    print("[INFO] Streaming en cours...", flush=True)
-
-    # Attendre la fin du streaming
-    elapsed = 0
+    print("[INFO] Réponse détectée. Capture du texte en cours...", flush=True)
+    
+    # 2. Capture et stabilisation du texte
     last_text = ""
-    while elapsed < timeout:
-        el = page.query_selector(response_selector)
-        if el:
-            last_text = el.inner_text()
+    stable_count = 0
+    
+    while time.time() - start_time < timeout:
+        # On passe le sélecteur dynamiquement au JavaScript de la page
+        current_text = page.evaluate(f"""
+            (() => {{
+                // 1. Cible le sélecteur exact configuré dans le JSON
+                let bodies = document.querySelectorAll({json.dumps(assistant_sel)});
+                if (bodies.length > 0 && bodies[bodies.length - 1].innerText.trim() !== "") {{
+                    return bodies[bodies.length - 1].innerText;
+                }}
+                
+                // 2. Sécurité / Fallback : si le sélecteur principal échoue, on cherche le conteneur générique
+                let responses = document.querySelectorAll('.font-claude-response');
+                if (responses.length > 0 && responses[responses.length - 1].innerText.trim() !== "") {{
+                    return responses[responses.length - 1].innerText;
+                }}
+                
+                // 3. Sécurité ultime : prend le dernier paragraphe du message de l'assistant
+                let paragraphs = document.querySelectorAll('[data-testid="assistant-message"] p, .font-claude-response p');
+                if (paragraphs.length > 0) {{
+                    return paragraphs[paragraphs.length - 1].innerText;
+                }}
+                
+                return "";
+            }})()
+        """)
+        
+        if current_text and current_text == last_text:
+            stable_count += 1
+            if stable_count >= 4: # Écriture terminée (1 seconde de stabilité)
+                break
         else:
-            # Streaming terminé — récupérer le texte final
-            break
-        time.sleep(0.5)
-        elapsed += 0.5
+            stable_count = 0
+            if current_text:
+                last_text = current_text
+                
+        time.sleep(0.25)
 
-    # Récupérer le texte final
-    final_text = page.evaluate("""
-        (() => {
-            const streaming = document.querySelector('[data-is-streaming]');
-            if (streaming) return streaming.innerText;
-            const sels = [
-                '[data-testid="assistant-message"]',
-                '.font-claude-message',
-                'div[data-role="assistant"]'
-            ];
-            for (const sel of sels) {
-                const els = document.querySelectorAll(sel);
-                if (els.length > 0) return els[els.length - 1].innerText;
-            }
-            return null;
-        })()
-    """)
-
-    return (final_text or last_text or "").strip() or None
+    final_text = last_text.strip()
+    return final_text if final_text else None
 
 
 def save_html_debug(page):
@@ -127,80 +156,104 @@ def save_html_debug(page):
         print(f"[DEBUG] Erreur sauvegarde HTML : {e}", flush=True)
 
 
-def delete_conversation(page):
-    """Supprime la conversation courante et navigue vers une nouvelle page."""
+def delete_conversation(page, selectors):
+    """Supprime la conversation en utilisant des listes de repli (fallback)."""
     try:
-        # Ouvrir le menu "Plus d'options"
-        menu_btn = page.query_selector("button[aria-label*=\"Plus d'options\"], button[aria-label*='More options']")
-        if not menu_btn:
-            # Chercher par aria-label partiel
-            menu_btn = page.query_selector("button[aria-label*='options' i]")
-        if not menu_btn:
-            print("[WARN] Bouton options non trouvé — suppression ignorée", flush=True)
-            return
-
-        menu_btn.click()
+        print("[INFO] Suppression de la conversation via fallback...", flush=True)
+        
+        # 1. On prépare les listes de secours pour chaque bouton
+        # Si le premier sélecteur du JSON échoue, click_with_fallback tentera les suivants
+        menu_options_list = [
+            selectors.get("menu_options", "button[aria-label*='options' i]"),
+            "button[aria-label*='options' i]",
+            "button[aria-haspopup='menu']"
+        ]
+        
+        delete_button_list = [
+            selectors.get("delete_button", "[data-testid='delete-chat-trigger']"),
+            "[data-testid='delete-chat-trigger']",
+            ".text-danger",
+            "div:has-text('Supprimer')"
+        ]
+        
+        confirm_delete_list = [
+            selectors.get("confirm_delete", "button:has-text('Supprimer')"),
+            "button:has-text('Supprimer')",
+            "button:has-text('Delete')",
+            ".bg-fill-danger"
+        ]
+        
+        # 2. On exécute les clics sécurisés
+        print("[DEBUG] Clic Bouton 1 (Options)...", flush=True)
+        click_with_fallback(page, menu_options_list, timeout=4000)
         time.sleep(0.5)
-
-        # Cliquer Delete
-        delete_trigger = page.query_selector("[data-testid='delete-chat-trigger']")
-        if not delete_trigger:
-            print("[WARN] Bouton delete non trouvé — suppression ignorée", flush=True)
-            return
-
-        delete_trigger.click()
+        
+        print("[DEBUG] Clic Bouton 2 (Supprimer)...", flush=True)
+        click_with_fallback(page, delete_button_list, timeout=3000)
         time.sleep(0.5)
-
-        # Confirmer la suppression
-        confirm_btn = page.query_selector("button[class*='danger']")
-        if not confirm_btn:
-            print("[WARN] Bouton confirmation non trouvé — suppression ignorée", flush=True)
-            return
-
-        confirm_btn.click()
-        time.sleep(1.0)
-        print("[OK] Conversation supprimée", flush=True)
+        
+        print("[DEBUG] Clic Bouton 3 (Confirmation)...", flush=True)
+        click_with_fallback(page, confirm_delete_list, timeout=3000)
+        
+        time.sleep(2.0)
+        print("[OK] Conversation supprimée avec succès (via fallback).", flush=True)
 
     except Exception as e:
-        print(f"[WARN] Erreur suppression conversation : {e}", flush=True)
+        print(f"[WARN] Échec de la suppression même avec les fallbacks : {e}", flush=True)
 
 
-def send_prompt_once(page, selector, submit_sel, submit_key, type_delay, prompt_text):
+def send_prompt_once(page, selector, submit_key, type_delay, prompt_text):
     """Insère et soumet le prompt sur la page courante."""
+    # 1. Attendre que la zone de texte soit visible
     page.wait_for_selector(selector, timeout=15000)
     page.click(selector)
-    time.sleep(0.3)
+    time.sleep(0.5)
 
+    # 2. Remplissage du texte (fill est le plus robuste pour le nouveau champ Claude)
     if type_delay > 0:
         page.type(selector, prompt_text, delay=type_delay)
     else:
-        insert_text_prosemirror(page, selector, prompt_text)
+        page.fill(selector, prompt_text)
 
     time.sleep(0.5)
 
-    submitted = False
-    if submit_sel:
-        try:
-            page.wait_for_selector(submit_sel, timeout=3000)
-            page.click(submit_sel)
-            submitted = True
-        except Exception:
-            pass
-    if not submitted and submit_key:
+    # 3. Envoi via la touche clavier configurée (Enter)
+    if submit_key:
         page.keyboard.press(submit_key)
 
     print("[INFO] Prompt soumis", flush=True)
+
+
+def click_with_fallback(page, selectors_list, timeout=3000):
+    """Tente de cliquer sur le premier sélecteur qui fonctionne dans une liste."""
+    for selector in selectors_list:
+        try:
+            element = page.locator(selector).last
+            element.wait_for(timeout=timeout)
+            element.click()
+            return True # Succès !
+        except Exception:
+            continue # On passe au sélecteur de secours
+    raise Exception("Aucun des sélecteurs fournis n'a fonctionné.")
 
 
 def send_via_browser(site_config, prompt_text):
     """Workflow complet : envoie, attend, retry si vide, supprime, retourne JSON."""
 
     url              = site_config.get("url")
-    selector         = site_config.get("selector")
-    submit_sel       = site_config.get("submit_selector")
-    submit_key       = site_config.get("submit_key")
-    response_sel     = site_config.get("response_selector", "[data-is-streaming]")
-    wait_before      = site_config.get("wait_before_type", 2.0)
+    
+    # On récupère le sous-dictionnaire des sélecteurs
+    selectors        = site_config.get("selectors", {})
+    selector         = selectors.get("chat_input")
+    response_sel     = selectors.get("assistant_message") # Optionnel pour plus tard
+    
+    # Correction ici : comme il n'y a pas de submit_selector dans ton JSON,
+    # on le force à None pour que la fonction comprenne qu'il faut utiliser le clavier (Enter)
+    submit_sel       = None
+    submit_key       = site_config.get("submit_key", "Enter")
+
+
+    wait_before      = site_config.get("wait_before_type", 3.0)
     type_delay       = site_config.get("type_delay", 0)
     headless         = site_config.get("headless", False)
     response_timeout = site_config.get("response_timeout", 120)
@@ -212,44 +265,59 @@ def send_via_browser(site_config, prompt_text):
             context = p.chromium.launch_persistent_context(
                 profile,
                 headless=headless,
-                channel="chrome"
+                channel="chrome",
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-restore-last-session",
+                    "--no-first-run"
+                ],
+                ignore_default_args=["--enable-automation"],
             )
-            page = context.new_page()
+            # Masquer navigator.webdriver
+            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            
+            # CORRECTION 1 : Évite le double onglet en récupérant celui déjà ouvert
+            page = context.pages[0] if context.pages else context.new_page()
         else:
             browser = p.chromium.launch(headless=headless)
             context = browser.new_context()
             page = context.new_page()
-        page = context.new_page()
 
         response_text = None
 
         for attempt in range(1, max_retries + 1):
             print(f"[INFO] Tentative {attempt}/{max_retries}", flush=True)
 
-            # Naviguer vers une page vide à chaque tentative
-            page.goto(url, wait_until="domcontentloaded")
-            print("[INFO] Page chargée", flush=True)
-            time.sleep(wait_before)
-
             try:
-                send_prompt_once(page, selector, submit_sel, submit_key, type_delay, prompt_text)
+                # Navigation vers Claude
+                page.goto(url, wait_until="domcontentloaded")
+                print("[INFO] Page chargée", flush=True)
+                time.sleep(wait_before)
+
+                # Envoi du prompt
+                # On passe les variables dans l'ordre classique, sans nommer les arguments
+                send_prompt_once(page, selector, submit_key, type_delay, prompt_text)
+                
+                # Attente et récupération de la réponse
+                # CORRECTION 2 : Utilisation de la nouvelle fonction de stabilisation
+                response_text = wait_for_response(page, selectors, response_timeout)
+
+                if response_text:
+                    print(f"[OK] Réponse obtenue ({len(response_text)} caractères)", flush=True)
+                    # CORRECTION 3 : On supprime la conversation réussie avant de quitter
+                    delete_conversation(page, selectors)
+                    break
+                else:
+                    print(f"[WARN] Réponse vide ou non récupérée.", flush=True)
+                    save_html_debug(page)
+                    # CORRECTION 3 : Supprime même si la réponse a échoué/est vide
+                    delete_conversation(page, selectors)
+
             except Exception as e:
-                print(f"[ERREUR] Envoi prompt : {e}", flush=True)
-                continue
-
-            # Attendre la réponse
-            response_text = wait_for_response(page, response_sel, response_timeout)
-
-            if response_text:
-                print(f"[OK] Réponse obtenue ({len(response_text)} chars)", flush=True)
-                # Supprimer la conversation
-                delete_conversation(page)
-                break
-            else:
-                print(f"[WARN] Réponse vide — sauvegarde HTML debug...", flush=True)
+                print(f"[ERREUR] Problème lors de la tentative {attempt} : {e}", flush=True)
                 save_html_debug(page)
-                # Supprimer la conversation vide avant retry
-                delete_conversation(page)
+                # CORRECTION 3 : Forcer la suppression de la conversation cassée avant la tentative suivante
+                delete_conversation(page, selectors)
                 time.sleep(2.0)
 
         context.close()

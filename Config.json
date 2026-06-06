@@ -1,7 +1,13 @@
 {
   "Claude" : {
     "url": "https://claude.ai/new",
-    "selector": "div[data-testid='chat-input']",
+    "selectors": {
+      "chat_input": "div[data-testid='chat-input']",
+      "assistant_message": ".font-claude-response-body",
+      "menu_options": "button[aria-label*='options' i]",
+      "delete_button": "[data-testid='delete-chat-trigger']",
+      "confirm_delete": "button:has-text('Supprimer')"
+    },
     "submit_key": "Enter",
     "response_selector": "[data-is-streaming]",
     "response_timeout": 120,
@@ -9,7 +15,7 @@
     "type_delay": 0,
     "headless": false,
     "max_retries": 3,
-    "chrome_profile": "C:\\Users\\luken\\AppData\\Local\\Google\\Chrome\\User Data",
+    "chrome_profile": "C:\\Users\\luken\\Desktop\\LKN Digital\\ChromeBot",
     "api": false
   },
   "ChatGPT": {
