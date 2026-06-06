@@ -8,7 +8,7 @@
     "wait_before_type": 3.0,
     "type_delay": 0,
     "headless": false,
-    "max_retries": 3
+    "max_retries": 3,
     "api": false
   },
   "ChatGPT": {
