@@ -113,7 +113,7 @@ def wait_for_response(page, selectors, timeout=120):
                 const stopBtn = document.querySelector('button[aria-label*="Stop" i], button[aria-label*="Interrompre" i], button[aria-label*="pause" i]');
                 if (stopBtn) return true;
                 
-                # Sécurité secondaire : Est-ce qu'on voit une icône de chargement/spinning ?
+                // Sécurité secondaire : Est-ce qu'on voit une icône de chargement/spinning ?
                 const spinner = document.querySelector('.animate-spin, [class*="loading" i]');
                 if (spinner) return true;
                 
