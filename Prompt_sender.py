@@ -74,7 +74,12 @@ def wait_for_response(page, selectors, timeout=120):
         "out of messages", "prochaine disponibilité", "erreur de connexion"
     ]
     
-    # On récupère le sélecteur du JSON (avec notre fallback en secours au cas où)
+    # Mots-clés qui indiquent que l'IA est en train de chercher ou réfléchir
+    loading_keywords = [
+        "recherche en cours", "recherche sur le web", "searching", 
+        "thinking", "en cours", "analysing"
+    ]
+    
     assistant_sel = selectors.get("assistant_message", ".font-claude-response-body")
     
     start_time = time.time()
@@ -88,7 +93,7 @@ def wait_for_response(page, selectors, timeout=120):
                 print(f"\n[BLOQUAGE CRITIQUE] Limite atteinte : '{keyword}'", flush=True)
                 sys.exit(1)
         
-        has_response = page.locator(assistant_sel).count() > 0
+        has_response = page.locator('[data-testid="assistant-message"]').count() > 0 or page.locator(assistant_sel).count() > 0
         if "/chat/" in page.url or has_response:
             started = True
             break
@@ -106,34 +111,33 @@ def wait_for_response(page, selectors, timeout=120):
     stable_count = 0
     
     while time.time() - start_time < timeout:
-        # On passe le sélecteur dynamiquement au JavaScript de la page
         current_text = page.evaluate(f"""
             (() => {{
-                // 1. Cible le sélecteur exact configuré dans le JSON
+                // 1. On cible le CONTENEUR global du dernier message de l'assistant (prend tout le texte d'un coup)
+                let containers = document.querySelectorAll('[data-testid="assistant-message"], .font-claude-response');
+                if (containers.length > 0 && containers[containers.length - 1].innerText.trim() !== "") {{
+                    return containers[containers.length - 1].innerText;
+                }}
+                
+                // 2. Sécurité : si le conteneur principal n'est pas détecté, on utilise le sélecteur du JSON
                 let bodies = document.querySelectorAll({json.dumps(assistant_sel)});
                 if (bodies.length > 0 && bodies[bodies.length - 1].innerText.trim() !== "") {{
                     return bodies[bodies.length - 1].innerText;
-                }}
-                
-                // 2. Sécurité / Fallback : si le sélecteur principal échoue, on cherche le conteneur générique
-                let responses = document.querySelectorAll('.font-claude-response');
-                if (responses.length > 0 && responses[responses.length - 1].innerText.trim() !== "") {{
-                    return responses[responses.length - 1].innerText;
-                }}
-                
-                // 3. Sécurité ultime : prend le dernier paragraphe du message de l'assistant
-                let paragraphs = document.querySelectorAll('[data-testid="assistant-message"] p, .font-claude-response p');
-                if (paragraphs.length > 0) {{
-                    return paragraphs[paragraphs.length - 1].innerText;
                 }}
                 
                 return "";
             }})()
         """)
         
-        if current_text and current_text == last_text:
+        text_lower = current_text.lower() if current_text else ""
+        
+        # Sécurité : On considère que c'est un écran de chargement UNIQUEMENT si le texte est très court
+        # Cela évite de bloquer le script quand la recherche reste affichée en haut de la vraie réponse
+        is_still_loading = len(current_text) < 150 and any(k in text_lower for k in loading_keywords)
+        
+        if current_text and current_text == last_text and not is_still_loading:
             stable_count += 1
-            if stable_count >= 4: # Écriture terminée (1 seconde de stabilité)
+            if stable_count >= 4: # 1 seconde de stabilité hors chargement
                 break
         else:
             stable_count = 0
@@ -143,6 +147,25 @@ def wait_for_response(page, selectors, timeout=120):
         time.sleep(0.25)
 
     final_text = last_text.strip()
+    
+    # --- NETTOYAGE DES ARTEFACTS DE RECHERCHE WEB ---
+    if final_text:
+        # Liste exacte des phrases magiques à supprimer si elles sont isolées sur une ligne
+        artifacts = ["web recherché", "web searched", "recherche en cours", "en cours"]
+        
+        lines = final_text.split("\n")
+        cleaned_lines = []
+        
+        for line in lines:
+            # Si la ligne nettoyée correspond à un artefact, on la zappe
+            if line.strip().lower() in artifacts:
+                continue
+            cleaned_lines.append(line)
+            
+        # Reconstitution du texte propre
+        final_text = "\n".join(cleaned_lines).strip()
+    # ------------------------------------------------
+    
     return final_text if final_text else None
 
 
@@ -297,7 +320,7 @@ def send_via_browser(site_config, prompt_text):
                 # Envoi du prompt
                 # On passe les variables dans l'ordre classique, sans nommer les arguments
                 send_prompt_once(page, selector, submit_key, type_delay, prompt_text)
-                
+
                 # Attente et récupération de la réponse
                 # CORRECTION 2 : Utilisation de la nouvelle fonction de stabilisation
                 response_text = wait_for_response(page, selectors, response_timeout)
