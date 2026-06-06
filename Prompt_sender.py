@@ -15,13 +15,12 @@ Retourne sur stdout :
 """
 
 import sys
-
-sys.stdout.reconfigure(encoding='utf-8')
-
 import json
 import time
 import argparse
 from pathlib import Path
+
+sys.stdout.reconfigure(encoding='utf-8')
 
 try:
     from playwright.sync_api import sync_playwright
@@ -202,7 +201,7 @@ def delete_conversation(page, selectors):
             "button:has-text('Delete')",
             ".bg-fill-danger"
         ]
-        
+        time.sleep(2.0)  # ← ajouter ici
         # 2. On exécute les clics sécurisés
         print("[DEBUG] Clic Bouton 1 (Options)...", flush=True)
         click_with_fallback(page, menu_options_list, timeout=4000)
