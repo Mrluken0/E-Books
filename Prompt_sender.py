@@ -207,8 +207,18 @@ def send_via_browser(site_config, prompt_text):
     max_retries      = site_config.get("max_retries", 3)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context()
+        profile = site_config.get("chrome_profile")
+        if profile:
+            context = p.chromium.launch_persistent_context(
+                profile,
+                headless=headless,
+                channel="chrome"
+            )
+            page = context.new_page()
+        else:
+            browser = p.chromium.launch(headless=headless)
+            context = browser.new_context()
+            page = context.new_page()
         page = context.new_page()
 
         response_text = None
@@ -242,7 +252,7 @@ def send_via_browser(site_config, prompt_text):
                 delete_conversation(page)
                 time.sleep(2.0)
 
-        browser.close()
+        context.close()
 
         if response_text:
             print(json.dumps({"status": "success", "response": response_text}, ensure_ascii=False))

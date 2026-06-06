@@ -9,6 +9,7 @@
     "type_delay": 0,
     "headless": false,
     "max_retries": 3,
+    "chrome_profile": "C:\\Users\\luken\\AppData\\Local\\Google\\Chrome\\User Data",
     "api": false
   },
   "ChatGPT": {
