@@ -15,6 +15,9 @@ Retourne sur stdout :
 """
 
 import sys
+
+sys.stdout.reconfigure(encoding='utf-8')
+
 import json
 import time
 import argparse
