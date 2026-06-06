@@ -2,11 +2,13 @@
   "Claude" : {
     "url": "https://claude.ai/new",
     "selector": "div[data-testid='chat-input']",
-    "submit_selector": "button[type='submit']",
     "submit_key": "Enter",
+    "response_selector": "[data-is-streaming]",
+    "response_timeout": 120,
     "wait_before_type": 3.0,
     "type_delay": 0,
     "headless": false,
+    "max_retries": 3
     "api": false
   },
   "ChatGPT": {
