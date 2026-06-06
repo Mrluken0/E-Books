@@ -142,7 +142,7 @@ def wait_for_response(page, selectors, timeout=120):
             # Si le bouton stop a disparu, on applique une mini-sécurité de stabilité (0.5 seconde)
             if current_text and current_text == last_text:
                 stable_count += 1
-                if stable_count >= 2: 
+                if stable_count >= 6: 
                     break
             else:
                 stable_count = 0
