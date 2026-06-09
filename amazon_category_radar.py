@@ -7,11 +7,26 @@ import pandas as pd
 import time
 import re
 import random
+import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
+
+"""
+================================================================================
+STRUCTURES HTML BSR GÉRÉES PAR CE PARSER :
+1. Structure Bullet Points standard (#detailBullets_feature_div ou #detailBulletsWrapper_feature_div) :
+   - Présente sous forme de balises <li> contenant "Classement des meilleures ventes d'Amazon"
+   - Gère les formats inline avec sous-catégories imbriquées.
+2. Structure Tableau Technique (#productDetails_detailBullets_sections1 ou #productDetails_db_sections) :
+   - Présente sous forme de lignes <tr> avec une cellule <th> "Classement des meilleures ventes"
+3. Variations Linguistiques et Typographiques :
+   - Regex tolérants aux syntaxes : "n°1 en ...", "1 dans ...", "Ranked 154 in ..."
+   - Nettoyage des espaces insécables (\xa0) et caractères de contrôle directionnels (\u200e).
+================================================================================
+"""
 
 BASE_URL = "https://www.amazon.fr"
 START_URL = "https://www.amazon.fr/gp/bestsellers/books"
@@ -30,7 +45,6 @@ UA_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
 ]
 
-# ── 2. Headers complets ───────────────────────────────────────────────────────
 def get_headers():
     return {
         "User-Agent": random.choice(UA_LIST),
@@ -77,15 +91,12 @@ BLOCK_SIGNALS = [
     "veuillez saisir les caractères", "api-services-support@amazon.com"
 ]
 
-# Locks pour thread-safety
 _print_lock = threading.Lock()
 _save_lock  = threading.Lock()
-
 
 def safe_print(*args, **kwargs):
     with _print_lock:
         print(*args, **kwargs, flush=True)
-
 
 def clean_text(text):
     if not text:
@@ -93,8 +104,6 @@ def clean_text(text):
     text = re.sub(r"[\u200e\u200f\u202a-\u202e\xa0]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
-
-# ── 3. Retry automatique ─────────────────────────────────────────────────────
 def get_soup(url, max_retries=3):
     for attempt in range(max_retries):
         try:
@@ -129,8 +138,6 @@ def get_soup(url, max_retries=3):
 
     raise Exception(f"Echec apres {max_retries} tentatives : {url}")
 
-
-# ── 4. Sauvegarde intermédiaire thread-safe ───────────────────────────────────
 def save_intermediate(all_books):
     if not all_books:
         return
@@ -148,14 +155,11 @@ def save_intermediate(all_books):
         except Exception as e:
             safe_print(f"    [SAVE] Erreur : {e}")
 
-
 def is_excluded(name):
     return any(word in name.lower() for word in EXCLUDED)
 
-
 def is_business_category(name):
     return any(word in name.lower() for word in BUSINESS_KEYWORDS)
-
 
 def valid_category(name, href):
     if not name or not href:
@@ -169,10 +173,8 @@ def valid_category(name, href):
         return False
     return True
 
-
 def normalize_url(href):
     return BASE_URL + href if href.startswith("/") else href
-
 
 def get_main_categories():
     soup = get_soup(START_URL)
@@ -187,7 +189,6 @@ def get_main_categories():
             categories.append((name, href))
     return list(dict(categories).items())
 
-
 def get_subcategories(url):
     soup = get_soup(url)
     subcategories = []
@@ -201,13 +202,11 @@ def get_subcategories(url):
             subcategories.append((name, href))
     return list(dict(subcategories).items())
 
-
 def extract_price(text):
     if not text:
         return None
     match = re.search(r"(\d+(?:[,.]\d+)?)", text.replace(",", "."))
     return float(match.group(1)) if match else None
-
 
 def get_price(item):
     for selector in [".a-price .a-offscreen", ".p13n-sc-price", "span.a-color-price", "span.a-size-base.a-color-price"]:
@@ -217,7 +216,6 @@ def get_price(item):
             if price is not None:
                 return price
     return None
-
 
 def get_title(item):
     img = item.select_one("img")
@@ -236,7 +234,6 @@ def get_title(item):
                 return title
     return ""
 
-
 def get_rating(item):
     for el in item.select("span.a-icon-alt"):
         match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", el.get_text())
@@ -246,19 +243,7 @@ def get_rating(item):
         match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", el.get("aria-label", ""))
         if match:
             return float(match.group(1).replace(",", "."))
-    for el in item.select("i[class*='a-icon-star'], span[class*='a-icon-star']"):
-        match = re.search(r"(\d+[,.]?\d*)", el.get("aria-label", ""))
-        if match:
-            val = float(match.group(1).replace(",", "."))
-            if 1.0 <= val <= 5.0:
-                return val
-    match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", item.get_text())
-    if match:
-        val = float(match.group(1).replace(",", "."))
-        if 1.0 <= val <= 5.0:
-            return val
     return None
-
 
 def get_reviews_count(item):
     def parse_count(text):
@@ -276,36 +261,46 @@ def get_reviews_count(item):
         val = parse_count(el.get_text())
         if val and val > 0:
             return val
-    for el in item.select("span.a-size-small, span.a-size-base"):
-        text = el.get_text().strip()
-        if re.match(r"^\d[\d\s,\.]*$", text) or re.match(r"^\d[\d\s,\.]*\s*(avis|évaluation)", text, re.I):
-            val = parse_count(text)
-            if val and 1 <= val <= 500000:
-                return val
-    matches = re.findall(r"(\d[\d\s]*)\s*(?:avis|évaluations|évaluation)", item.get_text(), re.I)
-    if matches:
-        val = parse_count(matches[0])
-        if val and val > 0:
-            return val
     return None
-
 
 def get_product_url(item):
     link = item.select_one("a[href*='/dp/']")
     if link:
         return normalize_url(link.get("href", "").split("?")[0])
-    img = item.select_one("img")
-    if img:
-        parent = img.find_parent("a")
-        if parent and "/dp/" in parent.get("href", ""):
-            return normalize_url(parent["href"].split("?")[0])
     return None
 
+def parse_bsr_text(full_text):
+    """
+    Parse globalisé du texte BSR pour en extraire le rang principal, sa catégorie et les sous-rangs.
+    Exemple de texte: "Classement des meilleures ventes d'Amazon: n°1,542 en Boutique Kindle (Voir le Top 100) n°12 en Santé"
+    """
+    bsr, bsr_category = None, ""
+    bsr_sub = {}
+
+    # Extraction du bloc principal global
+    main_match = re.search(r"(?:classement|rank|meilleures ventes).*?n[°o]?\s*([\d\s\.,]+)\s+(?:en|dans|in)\s+([^(\n]+)", full_text, re.IGNORECASE)
+    if main_match:
+        raw_rank = main_match.group(1)
+        bsr = int(re.sub(r"[\s\.,]", "", raw_rank))
+        bsr_category = clean_text(main_match.group(2).split(" (")[0])
+    
+    # Extraction secondaire itérative des sous-catégories associées
+    sub_matches = re.findall(r"n[°o]?\s*([\d\s\.,]+)\s+(?:en|dans|in)\s+([^(\n\r]+)", full_text, re.IGNORECASE)
+    for m_rank, m_cat in sub_matches:
+        clean_rank = int(re.sub(r"[\s\.,]", "", m_rank))
+        clean_cat = clean_text(m_cat.split(" (")[0])
+        if bsr and clean_rank == bsr and clean_cat == bsr_category:
+            continue  # ignore le doublon de l'élément racine principal
+        if clean_cat:
+            bsr_sub[clean_cat] = clean_rank
+
+    return bsr, bsr_category, bsr_sub
 
 def get_product_details(product_url):
     details = {
         "subtitle": "", "description": "", "publication_date": "",
-        "pages": None, "bsr": None, "rating_page": None, "reviews_count_page": None
+        "pages": None, "bsr": None, "bsr_category": "", "bsr_sub": "{}", 
+        "rating_page": None, "reviews_count_page": None
     }
 
     try:
@@ -315,8 +310,7 @@ def get_product_details(product_url):
         if el:
             details["subtitle"] = clean_text(el.get_text())
 
-        for sel in ["#bookDescription_feature_div", "#productDescription",
-                    "div[data-feature-name='bookDescription']", "#feature-bullets"]:
+        for sel in ["#bookDescription_feature_div", "#productDescription", "div[data-feature-name='bookDescription']"]:
             el = soup.select_one(sel)
             if el:
                 for tag in el.select("span.a-expander-prompt, noscript, style, script"):
@@ -339,72 +333,63 @@ def get_product_details(product_url):
             if match:
                 details["reviews_count_page"] = int(match.group(1))
 
-        for li in soup.select("#detailBulletsWrapper_feature_div li, #detailBullets_feature_div li"):
-            text = clean_text(li.get_text())
-            tl = text.lower()
+        # --- PARSING DU BSR (RECHERCHE AGRESSIVE) ---
+        bsr_text_dump = ""
+        
+        # Cas 1 : Div d'onglets de détails ou de listes à puces
+        for container_sel in ["#detailBulletsWrapper_feature_div", "#detailBullets_feature_div", "#bdSeeAllDetailLink"]:
+            cont = soup.select_one(container_sel)
+            if cont:
+                bsr_text_dump += " " + cont.get_text()
 
-            if ("nombre de pages" in tl or "pages" in tl) and not details["pages"]:
-                match = re.search(r"(\d{2,4})\s*pages?", text, re.I)
-                if match:
-                    details["pages"] = int(match.group(1))
-            if ("date de publication" in tl or "éditeur" in tl) and not details["publication_date"]:
-                match = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\d{4})", text)
-                if match:
-                    details["publication_date"] = match.group(1)
-            if ("classement" in tl or "meilleure vente" in tl or "best sellers rank" in tl or "best seller rank" in tl) and not details["bsr"]:
-                match = re.search(r":\s*([\d\s]+)\s+en\s+", text)
-                if not match:
-                    match = re.search(r":\s*([\d\s]+)\s+dans\s+", text)
-                if not match:
-                    match = re.search(r":\s*([\d\s]+)\s+in\s+", text)  # ← anglais
-                if not match:
-                    match = re.search(r"n[°o]?\s*(\d[\d\s]*)", text, re.I)
-                if match:
-                    details["bsr"] = int(re.sub(r"\s", "", match.group(1)))
-
-        for row in soup.select(
-            "#productDetails_detailBullets_sections1 tr,"
-            "#productDetails_techSpec_section_1 tr,"
-            "#productDetails_db_sections tr"
-        ):
+        # Cas 2 : Tableaux techniques de spécifications
+        for row in soup.select("#productDetails_detailBullets_sections1 tr, #productDetails_techSpec_section_1 tr, #productDetails_db_sections tr"):
             th = row.select_one("th")
             td = row.select_one("td")
-            if not th or not td:
-                continue
-            col_label = clean_text(th.get_text()).lower()
-            value = clean_text(td.get_text())
-            if "pages" in col_label and not details["pages"]:
-                match = re.search(r"(\d+)", value)
-                if match:
-                    details["pages"] = int(match.group(1))
-            if ("date" in col_label or "publication" in col_label) and not details["publication_date"]:
-                details["publication_date"] = value
-            if ("classement" in col_label or "best" in col_label) and not details["bsr"]:
-                match = re.search(r":\s*([\d\s]+)\s+en\s+", value)
-                if not match:
-                    match = re.search(r":\s*([\d\s]+)\s+dans\s+", value)
-                if not match:
-                    match = re.search(r":\s*([\d\s]+)\s+in\s+", value)  # ← anglais
-                if not match:
-                    match = re.search(r"n[°o]?\s*(\d[\d\s]*)", value, re.I)
-                if match:
-                    details["bsr"] = int(re.sub(r"\s", "", match.group(1)))
+            if th and td:
+                lbl = clean_text(th.get_text()).lower()
+                val = clean_text(td.get_text())
+                if "classement" in lbl or "best" in lbl or "ventes" in lbl:
+                    bsr_text_dump += f" Classement des meilleures ventes: {val}"
+                if "pages" in lbl and not details["pages"]:
+                    m = re.search(r"(\d+)", val)
+                    if m: details["pages"] = int(m.group(1))
+                if ("date" in lbl or "publication" in lbl) and not details["publication_date"]:
+                    details["publication_date"] = val
+
+        # Extraction standard complémentaire pour Pages & Date si trouvés en listes
+        for li in soup.select("#detailBullets_feature_div li"):
+            text = clean_text(li.get_text())
+            tl = text.lower()
+            if ("nombre de pages" in tl or "pages" in tl) and not details["pages"]:
+                match = re.search(r"(\d{2,4})\s*pages?", text, re.I)
+                if match: details["pages"] = int(match.group(1))
+            if ("date de publication" in tl or "éditeur" in tl) and not details["publication_date"]:
+                match = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\d{4})", text)
+                if match: details["publication_date"] = match.group(1)
+
+        # Extraction finale après concaténation des contextes BSR potentiels
+        if bsr_text_dump:
+            bsr, bsr_cat, bsr_sub = parse_bsr_text(bsr_text_dump)
+            if bsr:
+                details["bsr"] = bsr
+                details["bsr_category"] = bsr_cat
+                details["bsr_sub"] = json.dumps(bsr_sub, ensure_ascii=False)
 
     except Exception as e:
         safe_print(f"    [PAGE PRODUIT] Erreur {product_url}: {e}")
 
     return details
 
-
 def practical_score(title):
     return sum(1 for word in PRACTICAL_KEYWORDS if word in title.lower())
 
-
-def analyze_category(category, url, max_books=20):
+def analyze_category(category_context, url, max_books=20):
+    parent_name, parent_url, sub_name = category_context
     try:
         soup = get_soup(url)
     except Exception as e:
-        safe_print(f"    [ERREUR LISTE] {category}: {e}")
+        safe_print(f"    [ERREUR LISTE] {sub_name}: {e}")
         return []
 
     items = soup.select("div.zg-grid-general-faceout")
@@ -412,11 +397,6 @@ def analyze_category(category, url, max_books=20):
         items = soup.select("div[id^='gridItemRoot']")
 
     if not items:
-        page_text = soup.get_text().lower()
-        if any(s in page_text for s in BLOCK_SIGNALS):
-            safe_print(f"    [BLOCAGE SILENCIEUX] {category}")
-        else:
-            safe_print(f"    [VIDE] Aucun item pour {category}")
         return []
 
     books = []
@@ -426,7 +406,9 @@ def analyze_category(category, url, max_books=20):
             continue
 
         book = {
-            "category": category,
+            "parent_category": parent_name,
+            "parent_category_url": parent_url,
+            "category": sub_name,
             "category_url": url,
             "rank_in_category": rank,
             "title": title,
@@ -439,7 +421,9 @@ def analyze_category(category, url, max_books=20):
             "description": "",
             "publication_date": "",
             "pages": None,
-            "bsr": None
+            "bsr": None,
+            "bsr_category": "",
+            "bsr_sub": "{}"
         }
 
         if rank <= PRODUCT_PAGE_LIMIT and book["product_url"]:
@@ -449,35 +433,43 @@ def analyze_category(category, url, max_books=20):
                 book["rating"] = details.get("rating_page")
             if book["reviews_count"] is None:
                 book["reviews_count"] = details.get("reviews_count_page")
-            for key in ["subtitle", "description", "publication_date", "pages", "bsr"]:
+            for key in ["subtitle", "description", "publication_date", "pages", "bsr", "bsr_category", "bsr_sub"]:
                 book[key] = details.get(key)
-            # ── Délai réduit entre pages produit ─────────────────────────────
             time.sleep(random.uniform(0.8, 1.5))
 
         books.append(book)
 
     return books
 
-
-# ── Wrapper pour ThreadPoolExecutor ──────────────────────────────────────────
 def process_subcategory(args):
-    sub_name, sub_url = args
-    safe_print(f"  SUB: {sub_name}")
+    parent_name, parent_url, sub_name, sub_url = args
+    safe_print(f"  SUB: {sub_name} (Parent: {parent_name})")
     try:
-        books = analyze_category(sub_name, sub_url, max_books=20)
-        if books:
-            safe_print(f"    -> {len(books)} livres collectes")
+        context = (parent_name, parent_url, sub_name)
+        books = analyze_category(context, sub_url, max_books=20)
         return books
     except Exception as e:
         safe_print(f"  [ERREUR] {sub_name}: {e}")
         return []
 
-
-# ── SCORING NORMALISÉ ────────────────────────────────────────────────────────
 def compute_scores(df):
-    df_unique = df.drop_duplicates(subset=["product_url"], keep="first")
+    df_unique = df.drop_duplicates(subset=["product_url"], keep="first").copy()
+    
+    # Assurer le type pour éviter les erreurs de calcul d'indicateurs
+    if "bsr" in df_unique.columns:
+        df_unique["bsr"] = pd.to_numeric(df_unique["bsr"], errors="coerce")
 
-    summary = df_unique.groupby("category").agg(
+    def bsr_metrics(x):
+        valid_bsrs = x.dropna()
+        if valid_bsrs.empty:
+            return pd.Series([None, None, 0.0], index=["bsr_median", "bsr_min", "pct_with_bsr"])
+        pct = (len(valid_bsrs) / len(x)) * 100
+        return pd.Series([valid_bsrs.median(), valid_bsrs.min(), round(pct, 1)], index=["bsr_median", "bsr_min", "pct_with_bsr"])
+
+    # Groupby préservant la hiérarchie parent_category
+    grp = df_unique.groupby(["parent_category", "category"])
+    
+    summary = grp.agg(
         url=("category_url", "first"),
         books=("title", "count"),
         avg_price=("price", "mean"),
@@ -488,46 +480,31 @@ def compute_scores(df):
         practical=("practical", "sum")
     ).reset_index()
 
+    # Jointure avec nos métriques personnalisées du BSR
+    bsr_df = grp["bsr"].apply(bsr_metrics).unstack(level=-1).reset_index()
+    summary = pd.merge(summary, bsr_df, on=["parent_category", "category"], how="left")
+
     summary["avg_price"]     = summary["avg_price"].fillna(0).round(2)
     summary["median_price"]  = summary["median_price"].fillna(0).round(2)
     summary["avg_rating"]    = summary["avg_rating"].fillna(0).round(2)
     summary["total_reviews"] = summary["total_reviews"].fillna(0).astype(int)
     summary["avg_reviews"]   = summary["avg_reviews"].fillna(0).round(0)
 
-    summary["price_score"] = summary["avg_price"].apply(
-        lambda x: round(min((x / 20) * 25, 25), 1) if x > 0 else 0
-    )
-
+    summary["price_score"] = summary["avg_price"].apply(lambda x: round(min((x / 20) * 25, 25), 1) if x > 0 else 0)
     max_prac = summary["practical"].max()
-    summary["practical_score"] = summary["practical"].apply(
-        lambda x: round((x / max_prac) * 20, 1) if max_prac > 0 else 0
-    )
-
-    summary["business_score"] = summary["category"].apply(
-        lambda x: 20 if is_business_category(x) else 0
-    )
-
+    summary["practical_score"] = summary["practical"].apply(lambda x: round((x / max_prac) * 20, 1) if max_prac > 0 else 0)
+    summary["business_score"] = summary["category"].apply(lambda x: 20 if is_business_category(x) else 0)
     max_rev = summary["total_reviews"].max()
-    summary["demand_score"] = summary["total_reviews"].apply(
-        lambda x: round((x / max_rev) * 25, 1) if max_rev > 0 else 0
-    )
-
-    summary["quality_score"] = summary["avg_rating"].apply(
-        lambda x: round((x / 5) * 10, 1)
-    )
+    summary["demand_score"] = summary["total_reviews"].apply(lambda x: round((x / max_rev) * 25, 1) if max_rev > 0 else 0)
+    summary["quality_score"] = summary["avg_rating"].apply(lambda x: round((x / 5) * 10, 1))
 
     summary["kdp_score"] = (
-        summary["price_score"] + summary["practical_score"]
-        + summary["business_score"] + summary["demand_score"]
-        + summary["quality_score"]
+        summary["price_score"] + summary["practical_score"] + summary["business_score"] + summary["demand_score"] + summary["quality_score"]
     ).round(1)
 
-    summary["decision"] = summary["kdp_score"].apply(
-        lambda x: "GO" if x >= 70 else "A surveiller" if x >= 40 else "STOP"
-    )
+    summary["decision"] = summary["kdp_score"].apply(lambda x: "GO" if x >= 70 else "A surveiller" if x >= 40 else "STOP")
 
     return summary.sort_values("kdp_score", ascending=False)
-
 
 def main():
     all_books = []
@@ -541,21 +518,19 @@ def main():
             continue
 
         safe_print(f"MAIN: {main_name}")
-
         subcategories = get_subcategories(main_url)
         if not subcategories:
             subcategories = [(main_name, main_url)]
 
         subs_to_process = [
-            (sub_name, sub_url)
+            (main_name, main_url, sub_name, sub_url)
             for sub_name, sub_url in subcategories
             if is_business_category(sub_name)
         ]
 
-        # ── Parallélisme limité : 2 sous-catégories simultanées ──────────────
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = {
-                executor.submit(process_subcategory, args): args[0]
+                executor.submit(process_subcategory, args): args[2]
                 for args in subs_to_process
             }
             for future in as_completed(futures):
@@ -566,7 +541,6 @@ def main():
                     if categories_done % 5 == 0:
                         save_intermediate(all_books)
 
-        # ── Délai réduit entre catégories principales ────────────────────────
         time.sleep(random.uniform(1.0, 2.0))
 
     if not all_books:
@@ -590,11 +564,7 @@ def main():
 
     safe_print(f"\nTermine : {OUTPUT_FILE}")
     safe_print(f"   Categories     : {len(summary)}")
-    safe_print(f"   Livres scrapes : {len(df_dedup)} (brut : {len(df)}, doublons supprimes : {len(df) - len(df_dedup)})")
-    safe_print(f"   Descriptions   : {df_dedup['description'].notna().sum()} / {len(df_dedup)}")
-    safe_print(f"   Ratings        : {df_dedup['rating'].notna().sum()} / {len(df_dedup)}")
-    safe_print(f"   Reviews count  : {df_dedup['reviews_count'].notna().sum()} / {len(df_dedup)}")
-    safe_print(f"   BSR            : {df_dedup['bsr'].notna().sum()} / {len(df_dedup)}")
+    safe_print(f"   Livres scrapes : {len(df_dedup)}")
 
 
 if __name__ == "__main__":
