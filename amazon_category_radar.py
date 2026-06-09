@@ -1,6 +1,7 @@
 import sys
 import io
 import os
+import copy
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -16,16 +17,21 @@ os.environ["PYTHONIOENCODING"] = "utf-8"
 
 """
 ================================================================================
-STRUCTURES HTML BSR GÉRÉES PAR CE PARSER :
-1. Structure Bullet Points standard (#detailBullets_feature_div ou #detailBulletsWrapper_feature_div) :
-   - Présente sous forme de balises <li> contenant "Classement des meilleures ventes d'Amazon"
-   - Gère les formats inline avec sous-catégories imbriquées.
-2. Structure Tableau Technique (#productDetails_detailBullets_sections1 ou #productDetails_db_sections) :
-   - Présente sous forme de lignes <tr> avec une cellule <th> "Classement des meilleures ventes"
-3. Variations Linguistiques et Typographiques :
-   - Regex tolérants aux syntaxes : "n°1 en ...", "1 dans ...", "Ranked 154 in ..."
-   - Nettoyage des espaces insécables (\xa0) et caractères de contrôle directionnels (\u200e).
-================================================================================
+STRUCTURES HTML BSR GEREES PAR extract_bsr() :
+1. Bullet Points (#detailBullets_feature_div / #detailBulletsWrapper_feature_div) :
+   - <li> contenant "Classement des meilleures ventes d'Amazon : 1 542 en Livres"
+   - Sous-categories imbriquees dans <ul class="zg_hrsr"> (retirees par clonage pour
+     isoler le rang principal, puis re-extraites comme BSR secondaires).
+2. Tableaux techniques (#productDetails_detailBullets_sections1,
+   #productDetails_techSpec_section_1, #productDetails_db_sections, .prodDetTable) :
+   - <tr> avec <th> "Classement des meilleures ventes" et <td> rang + categorie.
+3. Variations linguistiques / typographiques tolerees :
+   - "n1 542 en ...", "#8 204 en ...", "1.542 dans ...", "#2,340 in Books" (anglais).
+   - Separateurs de milliers : espace, espace fine insecable, point, virgule.
+   - Nettoyage des caracteres invisibles Amazon (U+200E, U+200F, U+00A0, U+202A-202E).
+   - Dernier recours : rang nu sans categorie lisible (ex. <td>15673</td>).
+
+SORTIE : bsr (int), bsr_category (str), bsr_sub (dict {categorie: rang}, JSON).
 """
 
 BASE_URL = "https://www.amazon.fr"
@@ -45,19 +51,24 @@ UA_LIST = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
 ]
 
-def get_headers():
-    return {
+def get_headers(referer=None):
+    headers = {
         "User-Agent": random.choice(UA_LIST),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
         "Sec-Fetch-Dest": "document",
         "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Site": "same-origin" if referer else "none",
+        "Sec-Fetch-User": "?1",
         "Cache-Control": "max-age=0",
+        "Device-Memory": "8",
     }
+    if referer:
+        headers["Referer"] = referer
+    return headers
 
 EXCLUDED = [
     "roman", "fiction", "thriller", "fantasy", "fantastique", "manga", "bd",
@@ -104,19 +115,74 @@ def clean_text(text):
     text = re.sub(r"[\u200e\u200f\u202a-\u202e\xa0]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
-def get_soup(url, max_retries=3):
+# ── Sessions HTTP persistantes (cookies) — une par thread ─────────────────────
+# Amazon dépose des cookies de session (session-id, ubid...) qui réduisent
+# fortement les "soft-blocks" (pages 200 mais vidées de leur contenu). On réutilise
+# une Session requests par thread et on la régénère après détection d'un blocage.
+_thread_local = threading.local()
+
+def _new_session():
+    sess = requests.Session()
+    try:
+        # Warm-up : on récupère les cookies anonymes depuis la home Amazon
+        sess.get(BASE_URL, headers=get_headers(), timeout=20)
+        time.sleep(random.uniform(0.5, 1.2))
+    except Exception:
+        pass
+    return sess
+
+def _get_session():
+    sess = getattr(_thread_local, "session", None)
+    if sess is None:
+        sess = _new_session()
+        _thread_local.session = sess
+    return sess
+
+def _reset_session():
+    """Force la création d'une nouvelle session (nouveaux cookies) au prochain appel."""
+    old = getattr(_thread_local, "session", None)
+    if old is not None:
+        try:
+            old.close()
+        except Exception:
+            pass
+    _thread_local.session = None
+
+def get_soup(url, max_retries=4, require=None, referer=None):
+    """
+    Récupère et parse une page Amazon.
+
+    require : callback optionnel(soup)->bool. S'il renvoie False, la page est
+    considérée comme un soft-block (200 mais contenu manquant) et on réessaie avec
+    une session/UA fraîche. Au dernier essai, on renvoie quand même la page obtenue
+    pour exploiter au mieux les champs disponibles.
+    """
+    last_soup = None
     for attempt in range(max_retries):
         try:
-            response = requests.get(url, headers=get_headers(), timeout=25)
+            sess = _get_session()
+            response = sess.get(url, headers=get_headers(referer=referer), timeout=25)
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "html.parser")
+            last_soup = soup
 
             page_text = soup.get_text().lower()
             if any(signal in page_text for signal in BLOCK_SIGNALS):
                 wait = (attempt + 1) * random.uniform(8, 15)
                 safe_print(f"    [BLOCAGE] Amazon bloque. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                _reset_session()
                 time.sleep(wait)
                 continue
+
+            # Détection de soft-block : page renvoyée mais contenu attendu absent
+            if require is not None and not require(soup):
+                if attempt < max_retries - 1:
+                    wait = (attempt + 1) * random.uniform(4, 9)
+                    safe_print(f"    [SOFT-BLOCK] Contenu manquant. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                    _reset_session()
+                    time.sleep(wait)
+                    continue
+                return soup  # dernier essai : on rend ce qu'on a
 
             return soup
 
@@ -125,6 +191,7 @@ def get_soup(url, max_retries=3):
             if code in (429, 503):
                 wait = (attempt + 1) * random.uniform(5, 10)
                 safe_print(f"    [HTTP {code}] Rate limited. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                _reset_session()
                 time.sleep(wait)
             else:
                 raise
@@ -132,11 +199,32 @@ def get_soup(url, max_retries=3):
             if attempt < max_retries - 1:
                 wait = (attempt + 1) * random.uniform(3, 6)
                 safe_print(f"    [RESEAU] {e}. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
+                _reset_session()
                 time.sleep(wait)
             else:
                 raise
 
+    if last_soup is not None:
+        return last_soup
     raise Exception(f"Echec apres {max_retries} tentatives : {url}")
+
+def _has_product_details(soup):
+    """Valide qu'une page produit contient bien sa section détails (anti soft-block)."""
+    return bool(
+        soup.select_one("#detailBullets_feature_div")
+        or soup.select_one("#detailBulletsWrapper_feature_div")
+        or soup.select_one("#productDetails_db_sections")
+        or soup.select_one("#productDetails_detailBullets_sections1")
+        or soup.select_one("#productDetails_techSpec_section_1")
+        or soup.select_one(".prodDetTable")
+    )
+
+def _has_listing_items(soup):
+    """Valide qu'une page liste bestsellers contient bien sa grille de produits."""
+    return bool(
+        soup.select_one("div.zg-grid-general-faceout")
+        or soup.select_one("div[id^='gridItemRoot']")
+    )
 
 def save_intermediate(all_books):
     if not all_books:
@@ -177,7 +265,7 @@ def normalize_url(href):
     return BASE_URL + href if href.startswith("/") else href
 
 def get_main_categories():
-    soup = get_soup(START_URL)
+    soup = get_soup(START_URL, require=_has_listing_items)
     categories = []
     for a in soup.select("a[href*='/gp/bestsellers/books/']"):
         name = clean_text(a.get_text())
@@ -190,7 +278,7 @@ def get_main_categories():
     return list(dict(categories).items())
 
 def get_subcategories(url):
-    soup = get_soup(url)
+    soup = get_soup(url, require=_has_listing_items)
     subcategories = []
     for a in soup.select("a[href*='/gp/bestsellers/books/']"):
         name = clean_text(a.get_text())
@@ -269,48 +357,174 @@ def get_product_url(item):
         return normalize_url(link.get("href", "").split("?")[0])
     return None
 
-def parse_bsr_text(full_text):
-    """
-    Parse globalisé du texte BSR pour en extraire le rang principal, sa catégorie et les sous-rangs.
-    Exemple de texte: "Classement des meilleures ventes d'Amazon: n°1,542 en Boutique Kindle (Voir le Top 100) n°12 en Santé"
-    """
-    bsr, bsr_category = None, ""
-    bsr_sub = {}
+# ── Helpers BSR ───────────────────────────────────────────────────────────────
+# Caractères invisibles / espaces spéciaux qu'Amazon injecte dans le HTML du BSR
+_BSR_INVISIBLE = "‎‏‪-‮\xa0  - "
 
-    # Extraction du bloc principal global
-    main_match = re.search(r"(?:classement|rank|meilleures ventes).*?n[°o]?\s*([\d\s\.,]+)\s+(?:en|dans|in)\s+([^(\n]+)", full_text, re.IGNORECASE)
-    if main_match:
-        raw_rank = main_match.group(1)
-        bsr = int(re.sub(r"[\s\.,]", "", raw_rank))
-        bsr_category = clean_text(main_match.group(2).split(" (")[0])
-    
-    # Extraction secondaire itérative des sous-catégories associées
-    sub_matches = re.findall(r"n[°o]?\s*([\d\s\.,]+)\s+(?:en|dans|in)\s+([^(\n\r]+)", full_text, re.IGNORECASE)
-    for m_rank, m_cat in sub_matches:
-        clean_rank = int(re.sub(r"[\s\.,]", "", m_rank))
-        clean_cat = clean_text(m_cat.split(" (")[0])
-        if bsr and clean_rank == bsr and clean_cat == bsr_category:
-            continue  # ignore le doublon de l'élément racine principal
-        if clean_cat:
-            bsr_sub[clean_cat] = clean_rank
+# Rang + catégorie : tolère "n°1", "#1", "1 542", "1.542", "1,542", "en|dans|in"
+_BSR_RANK_RE = re.compile(
+    r"(?:n[°ºo]\s*|#)?\s*"                # préfixe optionnel n° / #
+    r"([\d][\d\s.,\xa0 ]*?)"                   # le rang (chiffres + séparateurs)
+    r"\s+(?:en|dans|in)\s+"                         # connecteur FR/EN
+    r"([^()<\x00-\x1f]+)",                          # nom de catégorie
+    re.IGNORECASE,
+)
+# Premier nombre isolé, en dernier recours (BSR sans catégorie lisible)
+_BSR_NUM_RE = re.compile(r"([\d][\d\s.,\xa0 ]*\d|\d)")
+# Préfixe "Classement des meilleures ventes (d'Amazon) :" / "Best Sellers Rank"
+_BSR_LABEL_RE = re.compile(
+    r"classement\s+des\s+meilleures\s+ventes(?:\s+d'amazon)?\s*:?|best\s*sellers\s*rank\s*:?",
+    re.IGNORECASE,
+)
+
+
+def _flatten(text):
+    """Aplatit un texte HTML : supprime retours ligne et caractères invisibles d'Amazon."""
+    if not text:
+        return ""
+    t = text.replace("\n", " ").replace("\r", " ")
+    t = re.sub(rf"[{_BSR_INVISIBLE}]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _parse_rank_int(raw):
+    """'1 542' / '1.542' / 'n°1 542' -> 1542 (ou None)."""
+    digits = re.sub(r"[^\d]", "", raw or "")
+    return int(digits) if digits else None
+
+
+def _clean_bsr_category(raw):
+    """Isole le nom de catégorie en coupant aux parenthèses, 'Voir', 'n°', '#', '<'."""
+    cat = _flatten(raw)
+    cat = re.split(r"\(|Voir|n[°ºo]\s|#|<", cat, flags=re.IGNORECASE)[0]
+    return clean_text(cat)
+
+
+def _parse_zg_hrsr(container):
+    """Extrait les BSR secondaires depuis un bloc <ul class='zg_hrsr'>."""
+    subs = {}
+    for li in container.select("ul.zg_hrsr li, .zg_hrsr li"):
+        txt = _flatten(li.get_text())
+        m = _BSR_RANK_RE.search(txt)
+        if not m:
+            continue
+        rank = _parse_rank_int(m.group(1))
+        cat = _clean_bsr_category(m.group(2))
+        if rank and cat and len(cat) < 120:
+            subs[cat] = rank
+    return subs
+
+
+def extract_bsr(soup):
+    """
+    Extracteur BSR unifié, couvrant toutes les structures HTML Amazon.fr connues.
+
+    Retourne (bsr:int|None, bsr_category:str, bsr_sub:dict{cat: rang}).
+
+    Stratégie : on collecte les conteneurs candidats (li de detailBullets + td des
+    tableaux techniques), on extrait d'abord les sous-catégories (zg_hrsr), puis on
+    isole la ligne du rang principal en retirant le bloc zg_hrsr cloné.
+    """
+    bsr, bsr_category, bsr_sub = None, "", {}
+    candidates = []
+
+    # 1. Structure "detail bullets" (liste à puces, cas le plus fréquent pour les livres)
+    bullets = (soup.select_one("#detailBulletsWrapper_feature_div")
+               or soup.select_one("#detailBullets_feature_div"))
+    if bullets:
+        for li in bullets.select("li"):
+            label = _flatten(li.get_text()).lower()
+            if "classement des meilleures ventes" in label or "best sellers rank" in label:
+                candidates.append(li)
+
+    # 2. Structures "tableau technique" (productDetails_* / prodDetTable)
+    for row in soup.select(
+        "#productDetails_detailBullets_sections1 tr,"
+        "#productDetails_techSpec_section_1 tr,"
+        "#productDetails_db_sections tr, .prodDetTable tr"
+    ):
+        th = row.select_one("th")
+        td = row.select_one("td")
+        if not th or not td:
+            continue
+        label = _flatten(th.get_text()).lower()
+        if "classement" in label or "best sellers rank" in label or "meilleures ventes" in label:
+            candidates.append(td)
+
+    for container in candidates:
+        if not bsr_sub:
+            bsr_sub = _parse_zg_hrsr(container)
+
+        # Clone pour isoler la ligne principale sans les sous-catégories
+        clone = copy.copy(container)
+        for nested in clone.select("ul.zg_hrsr, .zg_hrsr"):
+            nested.decompose()
+
+        text = _flatten(clone.get_text())
+        # On se place après le libellé "Classement des meilleures ventes :"
+        parts = _BSR_LABEL_RE.split(text)
+        text = parts[-1] if len(parts) > 1 else text
+
+        m = _BSR_RANK_RE.search(text)
+        if m:
+            rank = _parse_rank_int(m.group(1))
+            if rank:
+                bsr = rank
+                bsr_category = _clean_bsr_category(m.group(2))
+                break
+
+        # Dernier recours : premier nombre rencontré, sans catégorie
+        if bsr is None:
+            m2 = _BSR_NUM_RE.search(text)
+            if m2:
+                rank = _parse_rank_int(m2.group(1))
+                if rank:
+                    bsr = rank
+
+    # 3. Ultime repli : la page n'a pas exposé le BSR dans un conteneur connu
+    #    (variantes allégées / soft-blocks Amazon) mais le libellé est dans le texte.
+    if bsr is None:
+        full = _flatten(soup.get_text())
+        parts = _BSR_LABEL_RE.split(full)
+        if len(parts) > 1:
+            tail = parts[-1]
+            m = _BSR_RANK_RE.search(tail)
+            if m:
+                rank = _parse_rank_int(m.group(1))
+                if rank:
+                    bsr = rank
+                    bsr_category = _clean_bsr_category(m.group(2))
 
     return bsr, bsr_category, bsr_sub
 
 def get_product_details(product_url):
+    """
+    Récupère les détails d'un produit (livre) à partir de sa page Amazon.
+    Version de Production : Extraction par mots-clés à plat, tolérante aux structures instables.
+    """
     details = {
-        "subtitle": "", "description": "", "publication_date": "",
-        "pages": None, "bsr": None, "bsr_category": "", "bsr_sub": "{}", 
-        "rating_page": None, "reviews_count_page": None
+        "subtitle": "", 
+        "description": "", 
+        "publication_date": "",
+        "pages": None, 
+        "bsr": None, 
+        "bsr_category": "", 
+        "bsr_sub": "{}",
+        "rating_page": None, 
+        "reviews_count_page": None
     }
 
     try:
-        soup = get_soup(product_url)
+        soup = get_soup(product_url, require=_has_product_details, referer=START_URL)
 
-        el = soup.select_one("span#subtitle")
+        # 1. Sous-titre
+        el = soup.select_one("span#subtitle, #productSubtitle")
         if el:
             details["subtitle"] = clean_text(el.get_text())
 
-        for sel in ["#bookDescription_feature_div", "#productDescription", "div[data-feature-name='bookDescription']"]:
+        # 2. Description
+        for sel in ["#bookDescription_feature_div", "#productDescription",
+                    "div[data-feature-name='bookDescription']", "#feature-bullets"]:
             el = soup.select_one(sel)
             if el:
                 for tag in el.select("span.a-expander-prompt, noscript, style, script"):
@@ -320,6 +534,7 @@ def get_product_details(product_url):
                     details["description"] = raw[:1500]
                     break
 
+        # 3. Note (Rating)
         el = soup.select_one("span#acrPopover, span[data-hook='rating-out-of-text']")
         if el:
             text = el.get("title", "") or el.get_text()
@@ -327,54 +542,57 @@ def get_product_details(product_url):
             if match:
                 details["rating_page"] = float(match.group(1).replace(",", "."))
 
+        # 4. Nombre de commentaires
         el = soup.select_one("span#acrCustomerReviewText, span[data-hook='total-review-count']")
         if el:
-            match = re.search(r"(\d+)", re.sub(r"[\xa0\s,]", "", el.get_text()))
+            match = re.search(r"(\d+)", re.sub(r"[\xa0\s\u202f,]", "", el.get_text()))
             if match:
                 details["reviews_count_page"] = int(match.group(1))
 
-        # --- PARSING DU BSR (RECHERCHE AGRESSIVE) ---
-        bsr_text_dump = ""
-        
-        # Cas 1 : Div d'onglets de détails ou de listes à puces
-        for container_sel in ["#detailBulletsWrapper_feature_div", "#detailBullets_feature_div", "#bdSeeAllDetailLink"]:
-            cont = soup.select_one(container_sel)
-            if cont:
-                bsr_text_dump += " " + cont.get_text()
+        # --- BSR : extracteur unifié multi-structures (detailBullets + tableaux) ---
+        bsr, bsr_category, bsr_sub = extract_bsr(soup)
+        details["bsr"] = bsr
+        details["bsr_category"] = bsr_category
+        details["bsr_sub"] = json.dumps(bsr_sub, ensure_ascii=False)
 
-        # Cas 2 : Tableaux techniques de spécifications
-        for row in soup.select("#productDetails_detailBullets_sections1 tr, #productDetails_techSpec_section_1 tr, #productDetails_db_sections tr"):
-            th = row.select_one("th")
-            td = row.select_one("td")
-            if th and td:
-                lbl = clean_text(th.get_text()).lower()
-                val = clean_text(td.get_text())
-                if "classement" in lbl or "best" in lbl or "ventes" in lbl:
-                    bsr_text_dump += f" Classement des meilleures ventes: {val}"
-                if "pages" in lbl and not details["pages"]:
-                    m = re.search(r"(\d+)", val)
-                    if m: details["pages"] = int(m.group(1))
-                if ("date" in lbl or "publication" in lbl) and not details["publication_date"]:
-                    details["publication_date"] = val
+        # --- Pages & date de publication : bullets à puces d'abord ---
+        bullets_div = soup.select_one("#detailBulletsWrapper_feature_div") or soup.select_one("#detailBullets_feature_div")
+        if bullets_div:
+            for li in bullets_div.select("li"):
+                raw_text = _flatten(li.get_text())
+                if not raw_text:
+                    continue
+                tl = raw_text.lower()
 
-        # Extraction standard complémentaire pour Pages & Date si trouvés en listes
-        for li in soup.select("#detailBullets_feature_div li"):
-            text = clean_text(li.get_text())
-            tl = text.lower()
-            if ("nombre de pages" in tl or "pages" in tl) and not details["pages"]:
-                match = re.search(r"(\d{2,4})\s*pages?", text, re.I)
-                if match: details["pages"] = int(match.group(1))
-            if ("date de publication" in tl or "éditeur" in tl) and not details["publication_date"]:
-                match = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\d{4})", text)
-                if match: details["publication_date"] = match.group(1)
+                if "pages" in tl and not details["pages"]:
+                    match = re.search(r"(\d{1,4})\s*pages?", raw_text, re.I)
+                    if match:
+                        details["pages"] = int(match.group(1))
 
-        # Extraction finale après concaténation des contextes BSR potentiels
-        if bsr_text_dump:
-            bsr, bsr_cat, bsr_sub = parse_bsr_text(bsr_text_dump)
-            if bsr:
-                details["bsr"] = bsr
-                details["bsr_category"] = bsr_cat
-                details["bsr_sub"] = json.dumps(bsr_sub, ensure_ascii=False)
+                if ("date de publication" in tl or "éditeur" in tl) and not details["publication_date"]:
+                    match = re.search(r"(\d{1,2}\s+\w+\s+\d{4}|\d{4})", raw_text)
+                    if match:
+                        details["publication_date"] = match.group(1)
+
+        # --- Pages & date : repli sur les tableaux techniques ---
+        if not details["pages"] or not details["publication_date"]:
+            for row in soup.select(
+                "#productDetails_detailBullets_sections1 tr,"
+                "#productDetails_techSpec_section_1 tr,"
+                "#productDetails_db_sections tr, .prodDetTable tr"
+            ):
+                th = row.select_one("th")
+                td = row.select_one("td")
+                if not th or not td:
+                    continue
+                col_label = clean_text(th.get_text()).lower()
+                value = clean_text(td.get_text())
+                if "pages" in col_label and not details["pages"]:
+                    match = re.search(r"(\d+)", value)
+                    if match:
+                        details["pages"] = int(match.group(1))
+                if ("date" in col_label or "publication" in col_label) and not details["publication_date"]:
+                    details["publication_date"] = value
 
     except Exception as e:
         safe_print(f"    [PAGE PRODUIT] Erreur {product_url}: {e}")
@@ -387,7 +605,7 @@ def practical_score(title):
 def analyze_category(category_context, url, max_books=20):
     parent_name, parent_url, sub_name = category_context
     try:
-        soup = get_soup(url)
+        soup = get_soup(url, require=_has_listing_items, referer=START_URL)
     except Exception as e:
         safe_print(f"    [ERREUR LISTE] {sub_name}: {e}")
         return []
