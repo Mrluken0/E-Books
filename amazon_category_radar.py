@@ -118,7 +118,9 @@ def clean_text(text):
 # ── Sessions HTTP persistantes (cookies) — une par thread ─────────────────────
 # Amazon dépose des cookies de session (session-id, ubid...) qui réduisent
 # fortement les "soft-blocks" (pages 200 mais vidées de leur contenu). On réutilise
-# une Session requests par thread et on la régénère après détection d'un blocage.
+# une Session requests par thread (warm-up unique sur la home), conservée tant
+# qu'aucun captcha n'est levé — c'est cette persistance des cookies qui fait passer
+# le taux de pages complètes (donc le taux BSR) près de 100%.
 _thread_local = threading.local()
 
 def _new_session():
@@ -148,14 +150,18 @@ def _reset_session():
             pass
     _thread_local.session = None
 
-def get_soup(url, max_retries=4, require=None, referer=None):
+def get_soup(url, max_retries=3, require=None, referer=None):
     """
     Récupère et parse une page Amazon.
 
     require : callback optionnel(soup)->bool. S'il renvoie False, la page est
-    considérée comme un soft-block (200 mais contenu manquant) et on réessaie avec
-    une session/UA fraîche. Au dernier essai, on renvoie quand même la page obtenue
-    pour exploiter au mieux les champs disponibles.
+    considérée comme un soft-block (200 mais contenu manquant) et on réessaie en
+    CONSERVANT la session (les cookies sont précisément ce qui résout les blocages :
+    on rotationne seulement l'User-Agent via get_headers). Au dernier essai, on
+    renvoie quand même la page obtenue pour exploiter les champs disponibles.
+
+    NB : on ne réinitialise la session (perte des cookies + nouveau warm-up coûteux)
+    QUE sur un vrai captcha — là, les cookies sont probablement « flaggés ».
     """
     last_soup = None
     for attempt in range(max_retries):
@@ -168,18 +174,19 @@ def get_soup(url, max_retries=4, require=None, referer=None):
 
             page_text = soup.get_text().lower()
             if any(signal in page_text for signal in BLOCK_SIGNALS):
+                # Vrai captcha : cookies probablement flaggés -> on régénère la session
                 wait = (attempt + 1) * random.uniform(8, 15)
                 safe_print(f"    [BLOCAGE] Amazon bloque. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
                 _reset_session()
                 time.sleep(wait)
                 continue
 
-            # Détection de soft-block : page renvoyée mais contenu attendu absent
+            # Soft-block : page renvoyée mais contenu attendu absent.
+            # On garde la session (cookies OK) et on réessaie après une courte pause.
             if require is not None and not require(soup):
                 if attempt < max_retries - 1:
-                    wait = (attempt + 1) * random.uniform(4, 9)
+                    wait = random.uniform(2, 4)
                     safe_print(f"    [SOFT-BLOCK] Contenu manquant. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
-                    _reset_session()
                     time.sleep(wait)
                     continue
                 return soup  # dernier essai : on rend ce qu'on a
@@ -191,7 +198,6 @@ def get_soup(url, max_retries=4, require=None, referer=None):
             if code in (429, 503):
                 wait = (attempt + 1) * random.uniform(5, 10)
                 safe_print(f"    [HTTP {code}] Rate limited. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
-                _reset_session()
                 time.sleep(wait)
             else:
                 raise
@@ -199,7 +205,6 @@ def get_soup(url, max_retries=4, require=None, referer=None):
             if attempt < max_retries - 1:
                 wait = (attempt + 1) * random.uniform(3, 6)
                 safe_print(f"    [RESEAU] {e}. Attente {wait:.0f}s (tentative {attempt+1}/{max_retries})")
-                _reset_session()
                 time.sleep(wait)
             else:
                 raise
