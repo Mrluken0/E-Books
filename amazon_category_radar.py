@@ -94,7 +94,10 @@ PRACTICAL_KEYWORDS = [
     "pas à pas", "habitudes"
 ]
 
-PRODUCT_PAGE_LIMIT = 10
+# Nombre de livres (par sous-catégorie) pour lesquels on visite la page produit
+# afin d'en extraire BSR / pages / description / date. Aligné sur max_books (20)
+# pour qu'AUCUNE ligne de l'Excel ne reste sans données de détail.
+PRODUCT_PAGE_LIMIT = 20
 
 BLOCK_SIGNALS = [
     "robot check", "captcha", "enter the characters you see below",
