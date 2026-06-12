@@ -34,7 +34,7 @@ BLOCK_SIGNALS = [
     "veuillez saisir les caractères", "api-services-support@amazon.com"
 ]
 
-MIN_REVELANT_BOOKS     = 6
+MIN_RELEVANT_BOOKS     = 6
 TOP_BOOKS_PER_NICHE    = 5
 MAX_BOOKS_TARGETED     = 10
 MAX_REVIEWS_PER_FILTER = 15
