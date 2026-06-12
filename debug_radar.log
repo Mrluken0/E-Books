@@ -1,0 +1,57 @@
+Lecture du radar : C:\LKN_Digital\KDP\radar_kdp_clean.xlsx
+Mode ciblÚ : category='SantÚ mentale'
+Parent : SantÚ, Forme et DiÚtÚtique
+Tokens angle (12) : {'thÚrapie', 'retrouver', 'minutes', 'serein', 'mental', 'mÚdical', 'stress', 'femmes', 'anti', 'dÚbordÚes', 'jour', 'jargon'}
+  [OK] 12 livres trouvÚs dans la catÚgorie d'origine. Pas d'Úlargissement.
+Livres sÚlectionnÚs : 10 (sur 12 candidats pertinents)
+  [3pts] [SantÚ mentale] Apprendre Ó dessiner pas Ó pas - Cahier inspirant: 200 activ
+  [2pts] [SantÚ mentale] Tu iras mieux
+  [2pts] [SantÚ mentale] Le corps n'oublie rien: Le cerveau, l'esprit et le corps dan
+  [2pts] [SantÚ mentale] LA PSYCHOLOGIE DU LANGAGE CORPOREL: 6 LIVRES EN 1: Comprendr
+  [1pts] [SantÚ mentale] Hypersensible par ici: Trouver sa place dans un monde qui ne
+  [1pts] [SantÚ mentale] Tu es ta PrioritÚ: 100 VÚritÚs Essentielles Pour T'aimer
+  [1pts] [SantÚ mentale] TSA CHEZ L'ADULTE: Des mÚthodes pour gÚrer le stress, l'anxi
+  [1pts] [SantÚ mentale] Comment GuÚrir Un Style DÆAttachement Anxieux: Journal DÆAut
+  [1pts] [SantÚ mentale] Je vais aller mieux
+  [1pts] [SantÚ mentale] Jeux de MÚmoire Pour les Seniors: 571 Jeux de MÚmoire Stimul
+
+  Scrape : Apprendre Ó dessiner pas Ó pas - Cahier inspirant: 200 activ...
+        'critical' : 0 reviews
+        'three_star' : 0 reviews
+
+  Scrape : Tu iras mieux...
+        'critical' : 0 reviews
+        'three_star' : 0 reviews
+
+  Scrape : Le corps n'oublie rien: Le cerveau, l'esprit et le corps dan...
+        'critical' : 0 reviews
+        'three_star' : 0 reviews
+
+  Scrape : LA PSYCHOLOGIE DU LANGAGE CORPOREL: 6 LIVRES EN 1: Comprendr...
+        'critical' : 0 reviews
+        'three_star' : 0 reviews
+
+  Scrape : Hypersensible par ici: Trouver sa place dans un monde qui ne...
+        'critical' : 0 reviews
+        'three_star' : 0 reviews
+
+  Scrape : Tu es ta PrioritÚ: 100 VÚritÚs Essentielles Pour T'aimer...
+        'critical' : 0 reviews
+        'three_star' : 0 reviews
+
+  Scrape : TSA CHEZ L'ADULTE: Des mÚthodes pour gÚrer le stress, l'anxi...
+        'critical' : 0 reviews
+        'three_star' : 0 reviews
+
+  Scrape : Comment GuÚrir Un Style DÆAttachement Anxieux: Journal DÆAut...
+        'critical' : 0 reviews
+        'three_star' : 0 reviews
+
+  Scrape : Je vais aller mieux...
+        'critical' : 0 reviews
+      [ERREUR] ASIN B0CZBS11JC, filtre three_star, p1: 404 Client Error: Not Found for url: https://www.amazon.fr/product-reviews/B0CZBS11JC/?sortBy=recent&filterByStar=three_star&pageNumber=1
+        'three_star' : 0 reviews
+
+  Scrape : Jeux de MÚmoire Pour les Seniors: 571 Jeux de MÚmoire Stimul...
+        'critical' : 0 reviews
+        'three_star' : 0 reviews

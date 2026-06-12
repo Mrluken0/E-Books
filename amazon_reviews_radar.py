@@ -34,12 +34,13 @@ BLOCK_SIGNALS = [
     "veuillez saisir les caractères", "api-services-support@amazon.com"
 ]
 
-MIN_RELEVANT_BOOKS     = 6
-TOP_BOOKS_PER_NICHE    = 5
-MAX_BOOKS_TARGETED     = 10
-MAX_REVIEWS_PER_FILTER = 15
-STAR_FILTERS           = ["critical", "three_star"]
-MIN_KDP_SCORE          = 40
+MIN_RELEVANT_BOOKS      = 6
+TOP_BOOKS_PER_NICHE     = 5
+MIN_KDP_SCORE           = 40
+
+TARGET_NEGATIVE_REVIEWS = 20   # quota d'avis négatifs de qualité visé par niche
+MAX_BOOKS_HARD_CAP      = 25   # plafond dur de livres scrapés (sécurité anti-blocage)
+MIN_REVIEW_WORDS        = 25   # longueur minimale d'un avis pour être retenu
 
 
 def clean_text(text):
@@ -129,48 +130,39 @@ def extract_asin(product_url):
     return None
 
 
-def build_reviews_url(asin, star_filter, page=1):
-    return (
-        f"{BASE_URL}/product-reviews/{asin}/"
-        f"?sortBy=recent&filterByStar={star_filter}&pageNumber={page}"
-    )
+def build_product_url(asin):
+    return f"{BASE_URL}/dp/{asin}"
 
 
 def parse_rating_from_text(text):
     if not text:
         return None
-    match = re.search(r"(\d+[,.]?\d*)\s*sur\s*5", text)
+    match = re.search(r"(\d+[,.]?\d*)\s*(?:étoiles?\s*)?sur\s*5", text)
     if match:
         return float(match.group(1).replace(",", "."))
     return None
 
 
-def scrape_reviews_page(asin, star_filter, page=1):
-    url = build_reviews_url(asin, star_filter, page)
+def scrape_featured_reviews(asin):
+    url = build_product_url(asin)
     reviews = []
     try:
         soup = get_soup(url)
         for item in soup.select("div[data-hook='review']"):
             rating = None
             rating_el = item.select_one("i[data-hook='review-star-rating'] span.a-icon-alt")
-            if not rating_el:
-                rating_el = item.select_one("i[data-hook='cmps-review-star-rating'] span.a-icon-alt")
             if rating_el:
                 rating = parse_rating_from_text(rating_el.get_text())
 
             title = ""
-            title_el = item.select_one("a[data-hook='review-title'] span:not(.a-icon-alt)")
-            if not title_el:
-                title_el = item.select_one("span[data-hook='review-title']")
+            title_el = item.select_one("h5[data-hook='reviewTitle']")
             if title_el:
                 title = clean_text(title_el.get_text())
 
             body = ""
-            body_el = item.select_one("span[data-hook='review-body'] span")
-            if not body_el:
-                body_el = item.select_one("div[data-hook='review-collapsed'] span")
+            body_el = item.select_one("div[data-hook='reviewRichContentContainer']")
             if body_el:
-                body = clean_text(body_el.get_text())
+                body = clean_text(body_el.get_text(" ", strip=True))
 
             date = ""
             date_el = item.select_one("span[data-hook='review-date']")
@@ -185,28 +177,25 @@ def scrape_reviews_page(asin, star_filter, page=1):
                     "review_date": date
                 })
     except Exception as e:
-        print(f"      [ERREUR] ASIN {asin}, filtre {star_filter}, p{page}: {e}", file=sys.stderr)
+        print(f"      [ERREUR] ASIN {asin}: {e}", file=sys.stderr)
     return reviews
 
 
-def scrape_book_reviews(asin, book_title, max_per_filter=MAX_REVIEWS_PER_FILTER):
-    all_reviews = []
-    for star_filter in STAR_FILTERS:
-        collected = []
-        page = 1
-        while len(collected) < max_per_filter:
-            reviews = scrape_reviews_page(asin, star_filter, page)
-            if not reviews:
-                break
-            collected.extend(reviews)
-            page += 1
-            time.sleep(random.uniform(0.8, 1.8))
-            if page > 3:
-                break
-        collected = collected[:max_per_filter]
-        all_reviews.extend(collected)
-        print(f"        '{star_filter}' : {len(collected)} reviews", file=sys.stderr)
-    return all_reviews
+def scrape_book_reviews(asin, book_title):
+    featured = scrape_featured_reviews(asin)
+
+    # Filtre étoiles : uniquement les notes négatives (1-3★)
+    negatives = [r for r in featured if r["rating"] is not None and r["rating"] <= 3.0]
+
+    # Filtre qualité : écarter les avis creux (sans filtre de sentiment ni LLM)
+    quality = [r for r in negatives if len(r["review_body"].split()) >= MIN_REVIEW_WORDS]
+
+    print(
+        f"        {len(featured)} featured / {len(negatives)} négatifs / "
+        f"{len(quality)} retenus après filtre qualité",
+        file=sys.stderr,
+    )
+    return quality
 
 
 def extract_pain_points(reviews_df):
@@ -315,14 +304,22 @@ def process_targeted(category, angle, df_data):
     else:
         relevant_books = relevant_books.sort_values("_angle_score", ascending=False)
 
-    top_books = relevant_books.head(MAX_BOOKS_TARGETED)
-    print(f"Livres sélectionnés : {len(top_books)} (sur {len(relevant_books)} candidats pertinents)", file=sys.stderr)
-    for _, b in top_books.iterrows():
-        print(f"  [{b['_angle_score']}pts] [{b['category']}] {str(b['title'])[:60]}", file=sys.stderr)
+    print(f"Candidats pertinents (angle_score > 0) : {len(relevant_books)}", file=sys.stderr)
+    print(f"Cible : {TARGET_NEGATIVE_REVIEWS} avis négatifs / plafond dur : {MAX_BOOKS_HARD_CAP} livres", file=sys.stderr)
 
-    # 5. Scraper les reviews
-    all_reviews = []
-    for _, book in top_books.iterrows():
+    # 5. Boucle de collecte pilotée par quota (early-stop + plafond dur).
+    #    L'ordre de relevant_books est déjà trié par pertinence (angle_score desc).
+    #    Le quota est une CIBLE : on ne franchit jamais la frontière de pertinence
+    #    pour gonfler le volume (le fallback sœurs reste conditionné à angle_score > 0).
+    collected_negatives = []
+    books_scraped       = 0
+    for _, book in relevant_books.iterrows():
+        if len(collected_negatives) >= TARGET_NEGATIVE_REVIEWS:
+            print(f"  [EARLY-STOP] Quota de {TARGET_NEGATIVE_REVIEWS} avis négatifs atteint.", file=sys.stderr)
+            break
+        if books_scraped >= MAX_BOOKS_HARD_CAP:
+            print(f"  [PLAFOND] Plafond dur de {MAX_BOOKS_HARD_CAP} livres atteint.", file=sys.stderr)
+            break
         title       = book.get("title", "")
         product_url = book.get("product_url", "")
         asin        = extract_asin(product_url)
@@ -338,13 +335,16 @@ def process_targeted(category, angle, df_data):
                 "product_url": product_url,
                 "angle_score": int(book["_angle_score"])
             })
-        all_reviews.extend(reviews)
+        collected_negatives.extend(reviews)
+        books_scraped += 1
         time.sleep(random.uniform(1.5, 3.0))
 
-    if not all_reviews:
-        return {"status": "error", "message": "Aucune review collectée"}
+    target_reached = len(collected_negatives) >= TARGET_NEGATIVE_REVIEWS
 
-    reviews_df  = pd.DataFrame(all_reviews)
+    if not collected_negatives:
+        return {"status": "error", "message": "Aucune review négative exploitable sur les livres analysés"}
+
+    reviews_df  = pd.DataFrame(collected_negatives)
     pain_points = extract_pain_points(reviews_df)
 
     by_cat = (
@@ -361,15 +361,16 @@ def process_targeted(category, angle, df_data):
         "sibling_categories":       sibling_cats,
         "sibling_fallback_used":    sibling_fallback_used,
         "books_scored":             len(relevant_books),
-        "books_scraped":            len(top_books),
-        "total_reviews":            len(all_reviews),
+        "books_scraped":            books_scraped,
+        "target_reached":           target_reached,
+        "total_reviews":            len(collected_negatives),
         "breakdown_by_subcategory": by_cat,
         "pain_points": [{
             "category":            category,
             "parent_category":     parent_category,
             "angle":               angle,
-            "books_analyzed":      len(top_books),
-            "reviews_collected":   len(all_reviews),
+            "books_analyzed":      books_scraped,
+            "reviews_collected":   len(collected_negatives),
             "avg_negative_rating": round(float(reviews_df["rating"].mean()), 2) if "rating" in reviews_df.columns else None,
             "pain_points_raw":     pain_points
         }]
