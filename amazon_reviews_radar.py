@@ -34,6 +34,7 @@ BLOCK_SIGNALS = [
     "veuillez saisir les caractères", "api-services-support@amazon.com"
 ]
 
+MIN_REVELANT_BOOKS     = 6
 TOP_BOOKS_PER_NICHE    = 5
 MAX_BOOKS_TARGETED     = 10
 MAX_REVIEWS_PER_FILTER = 15
@@ -262,40 +263,64 @@ def process_niches(df_go, df_data):
 
 
 def process_targeted(category, angle, df_data):
-    # 1. Remonter le parent
+    # 1. Vérifier l'existence de la catégorie et remonter le parent
     match = df_data[df_data["category"] == category]
     if match.empty:
-        return {"status": "error", "message": f"Catégorie '{category}' introuvable dans le radar"}
+         return {"status": "error", "message": f"Catégorie '{category}' introuvable dans le radar"}
 
     parent_category = match.iloc[0]["parent_category"]
     print(f"Parent : {parent_category}", file=sys.stderr)
 
-    # 2. Toutes les sous-catégories soeurs (même parent)
-    sibling_data = df_data[df_data["parent_category"] == parent_category].copy()
-    sibling_cats = sibling_data["category"].unique().tolist()
-    print(f"Sous-catégories soeurs : {sibling_cats}", file=sys.stderr)
-
-    # 3. Scorer chaque livre par rapport à l'angle
+    # 2. Préparer les tokens de l'angle
     angle_tokens = _tokenize(angle)
     print(f"Tokens angle ({len(angle_tokens)}) : {angle_tokens}", file=sys.stderr)
 
-    sibling_data["_angle_score"] = sibling_data.apply(
+    # 3. Premier essai : Pool restreint à la sous-catégorie demandée uniquement
+    target_data = df_data[df_data["category"] == category].copy()
+    target_data["_angle_score"] = target_data.apply(
         lambda row: angle_score(row, angle_tokens), axis=1
     )
+    
+    # Garde dure : Exclusion immédiate de tout score égal à 0
+    relevant_books = target_data[target_data["_angle_score"] > 0].copy()
+    
+    sibling_fallback_used = False
+    sibling_cats = []  # Reste vide si pas de fallback (conformément à la documentation)
 
-    if "rank_in_category" in sibling_data.columns:
-        sibling_data = sibling_data.sort_values(
+    # 4. Fallback conditionnel vers les catégories sœurs
+    if len(relevant_books) < MIN_RELEVANT_BOOKS:
+        print(f"  [FALLBACK] Seulement {len(relevant_books)} livres avec score > 0. Élargissement aux sœurs.", file=sys.stderr)
+        sibling_fallback_used = True
+        
+        sibling_data = df_data[df_data["parent_category"] == parent_category].copy()
+        sibling_cats = sibling_data["category"].unique().tolist()
+        
+        sibling_data["_angle_score"] = sibling_data.apply(
+            lambda row: angle_score(row, angle_tokens), axis=1
+        )
+        # On applique la garde dure également sur le pool élargi
+        relevant_books = sibling_data[sibling_data["_angle_score"] > 0].copy()
+    else:
+        print(f"  [OK] {len(relevant_books)} livres trouvés dans la catégorie d'origine. Pas d'élargissement.", file=sys.stderr)
+
+    # Si aucun livre n'a un score > 0, même après fallback
+    if relevant_books.empty:
+        return {"status": "error", "message": "Aucun livre pertinent pour cet angle"}
+
+    # Tri par pertinence (score d'abord, puis BSR/rank)
+    if "rank_in_category" in relevant_books.columns:
+        relevant_books = relevant_books.sort_values(
             ["_angle_score", "rank_in_category"], ascending=[False, True]
         )
     else:
-        sibling_data = sibling_data.sort_values("_angle_score", ascending=False)
+        relevant_books = relevant_books.sort_values("_angle_score", ascending=False)
 
-    top_books = sibling_data.head(MAX_BOOKS_TARGETED)
-    print(f"Livres sélectionnés : {len(top_books)} (sur {len(sibling_data)} candidats)", file=sys.stderr)
+    top_books = relevant_books.head(MAX_BOOKS_TARGETED)
+    print(f"Livres sélectionnés : {len(top_books)} (sur {len(relevant_books)} candidats pertinents)", file=sys.stderr)
     for _, b in top_books.iterrows():
         print(f"  [{b['_angle_score']}pts] [{b['category']}] {str(b['title'])[:60]}", file=sys.stderr)
 
-    # 4. Scraper les reviews
+    # 5. Scraper les reviews
     all_reviews = []
     for _, book in top_books.iterrows():
         title       = book.get("title", "")
@@ -334,7 +359,8 @@ def process_targeted(category, angle, df_data):
         "category_requested":       category,
         "parent_category":          parent_category,
         "sibling_categories":       sibling_cats,
-        "books_scored":             len(sibling_data),
+        "sibling_fallback_used":    sibling_fallback_used,
+        "books_scored":             len(relevant_books),
         "books_scraped":            len(top_books),
         "total_reviews":            len(all_reviews),
         "breakdown_by_subcategory": by_cat,
@@ -348,7 +374,6 @@ def process_targeted(category, angle, df_data):
             "pain_points_raw":     pain_points
         }]
     }
-
 
 def main():
     parser = argparse.ArgumentParser(description="Scrape reviews Amazon par niche")
