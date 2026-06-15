@@ -15,6 +15,8 @@ import threading
 
 os.environ["PYTHONIOENCODING"] = "utf-8"
 
+
+
 """
 ================================================================================
 STRUCTURES HTML BSR GEREES PAR extract_bsr() :
