@@ -30,11 +30,20 @@ except ImportError:
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "Config.json"
 HTML_DUMP_PATH      = Path(__file__).parent / "debug_empty_response.html"
-
+PLACEHOLDERS_URL    = Path(__file__).parent / "placeholders.json"
 
 def load_config(config_path):
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_placeholders():
+    try:
+        import urllib.request
+        with urllib.request.urlopen(PLACEHOLDERS_URL, timeout=5) as r:
+            return json.loads(r.read().decode('utf-8'))
+    except Exception:
+        return ["En cours de réflexion, veuillez patienter", "Thinking..."]
 
 
 def list_sites(config):
@@ -106,6 +115,8 @@ def wait_for_response(page, selectors, timeout=120):
     last_text = ""
     stable_count = 0
     
+    placeholders = load_placeholders()
+
     while time.time() - start_time < timeout:
         # Sécurité : vérifier si Claude a fini de générer en regardant les boutons de l'interface
         # Tant que le bouton de stop [aria-label="Stop generating"] ou [aria-label="Interrompre"] existe, l'animation tourne
@@ -140,10 +151,13 @@ def wait_for_response(page, selectors, timeout=120):
                 last_text = current_text
         else:
             # Ignorer si le texte contient uniquement du "Thinking"
-            is_thinking_only = current_text.strip().replace("Thinking", "").replace("\n", "").strip() == ""
-            
-            if is_thinking_only:
-                # Claude est encore en phase thinking, on remet is_generating à True artificiellement
+
+            is_fake_response = (
+                current_text.strip().replace("Thinking", "").replace("\n", "").strip() == ""
+                or any(p.lower() in current_text.strip().lower() for p in placeholders)
+            )
+
+            if is_fake_response:
                 stable_count = 0
                 time.sleep(0.5)
                 continue
