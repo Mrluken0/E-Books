@@ -139,10 +139,18 @@ def wait_for_response(page, selectors, timeout=120):
             if current_text:
                 last_text = current_text
         else:
-            # Si le bouton stop a disparu, on applique une mini-sécurité de stabilité (0.5 seconde)
+            # Ignorer si le texte contient uniquement du "Thinking"
+            is_thinking_only = current_text.strip().replace("Thinking", "").replace("\n", "").strip() == ""
+            
+            if is_thinking_only:
+                # Claude est encore en phase thinking, on remet is_generating à True artificiellement
+                stable_count = 0
+                time.sleep(0.5)
+                continue
+            
             if current_text and current_text == last_text:
                 stable_count += 1
-                if stable_count >= 6: 
+                if stable_count >= 6:
                     break
             else:
                 stable_count = 0
@@ -164,6 +172,7 @@ def wait_for_response(page, selectors, timeout=120):
         final_text = "\n".join(cleaned_lines).strip()
     
     return final_text if final_text else None
+
 
 def save_html_debug(page):
     """Sauvegarde le HTML de la page pour analyse."""

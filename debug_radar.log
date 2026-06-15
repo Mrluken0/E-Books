@@ -1,57 +1,43 @@
 Lecture du radar : C:\LKN_Digital\KDP\radar_kdp_clean.xlsx
 Mode ciblÚ : category='SantÚ mentale'
 Parent : SantÚ, Forme et DiÚtÚtique
-Tokens angle (12) : {'thÚrapie', 'retrouver', 'minutes', 'serein', 'mental', 'mÚdical', 'stress', 'femmes', 'anti', 'dÚbordÚes', 'jour', 'jargon'}
+Tokens angle (12) : {'anti', 'retrouver', 'minutes', 'mental', 'dÚbordÚes', 'serein', 'thÚrapie', 'stress', 'femmes', 'jargon', 'jour', 'mÚdical'}
   [OK] 12 livres trouvÚs dans la catÚgorie d'origine. Pas d'Úlargissement.
-Livres sÚlectionnÚs : 10 (sur 12 candidats pertinents)
-  [3pts] [SantÚ mentale] Apprendre Ó dessiner pas Ó pas - Cahier inspirant: 200 activ
-  [2pts] [SantÚ mentale] Tu iras mieux
-  [2pts] [SantÚ mentale] Le corps n'oublie rien: Le cerveau, l'esprit et le corps dan
-  [2pts] [SantÚ mentale] LA PSYCHOLOGIE DU LANGAGE CORPOREL: 6 LIVRES EN 1: Comprendr
-  [1pts] [SantÚ mentale] Hypersensible par ici: Trouver sa place dans un monde qui ne
-  [1pts] [SantÚ mentale] Tu es ta PrioritÚ: 100 VÚritÚs Essentielles Pour T'aimer
-  [1pts] [SantÚ mentale] TSA CHEZ L'ADULTE: Des mÚthodes pour gÚrer le stress, l'anxi
-  [1pts] [SantÚ mentale] Comment GuÚrir Un Style DÆAttachement Anxieux: Journal DÆAut
-  [1pts] [SantÚ mentale] Je vais aller mieux
-  [1pts] [SantÚ mentale] Jeux de MÚmoire Pour les Seniors: 571 Jeux de MÚmoire Stimul
+Candidats pertinents (angle_score > 0) : 12
+Cible : 20 avis nÚgatifs / plafond dur : 25 livres
 
   Scrape : Apprendre Ó dessiner pas Ó pas - Cahier inspirant: 200 activ...
-        'critical' : 0 reviews
-        'three_star' : 0 reviews
+        13 featured / 0 nÚgatifs / 0 retenus aprÞs filtre qualitÚ
 
   Scrape : Tu iras mieux...
-        'critical' : 0 reviews
-        'three_star' : 0 reviews
+        6 featured / 0 nÚgatifs / 0 retenus aprÞs filtre qualitÚ
 
   Scrape : Le corps n'oublie rien: Le cerveau, l'esprit et le corps dan...
-        'critical' : 0 reviews
-        'three_star' : 0 reviews
+        0 featured / 0 nÚgatifs / 0 retenus aprÞs filtre qualitÚ
 
   Scrape : LA PSYCHOLOGIE DU LANGAGE CORPOREL: 6 LIVRES EN 1: Comprendr...
-        'critical' : 0 reviews
-        'three_star' : 0 reviews
+        13 featured / 0 nÚgatifs / 0 retenus aprÞs filtre qualitÚ
 
   Scrape : Hypersensible par ici: Trouver sa place dans un monde qui ne...
-        'critical' : 0 reviews
-        'three_star' : 0 reviews
+        0 featured / 0 nÚgatifs / 0 retenus aprÞs filtre qualitÚ
 
   Scrape : Tu es ta PrioritÚ: 100 VÚritÚs Essentielles Pour T'aimer...
-        'critical' : 0 reviews
-        'three_star' : 0 reviews
+        0 featured / 0 nÚgatifs / 0 retenus aprÞs filtre qualitÚ
 
   Scrape : TSA CHEZ L'ADULTE: Des mÚthodes pour gÚrer le stress, l'anxi...
-        'critical' : 0 reviews
-        'three_star' : 0 reviews
+        11 featured / 1 nÚgatifs / 0 retenus aprÞs filtre qualitÚ
 
   Scrape : Comment GuÚrir Un Style DÆAttachement Anxieux: Journal DÆAut...
-        'critical' : 0 reviews
-        'three_star' : 0 reviews
+        2 featured / 0 nÚgatifs / 0 retenus aprÞs filtre qualitÚ
 
   Scrape : Je vais aller mieux...
-        'critical' : 0 reviews
-      [ERREUR] ASIN B0CZBS11JC, filtre three_star, p1: 404 Client Error: Not Found for url: https://www.amazon.fr/product-reviews/B0CZBS11JC/?sortBy=recent&filterByStar=three_star&pageNumber=1
-        'three_star' : 0 reviews
+        0 featured / 0 nÚgatifs / 0 retenus aprÞs filtre qualitÚ
 
   Scrape : Jeux de MÚmoire Pour les Seniors: 571 Jeux de MÚmoire Stimul...
-        'critical' : 0 reviews
-        'three_star' : 0 reviews
+        13 featured / 1 nÚgatifs / 1 retenus aprÞs filtre qualitÚ
+
+  Scrape : J'ai broyÚ du Noir pour voir la vie en Rose: Apaiser son anx...
+        13 featured / 2 nÚgatifs / 2 retenus aprÞs filtre qualitÚ
+
+  Scrape : GuÚrir de vos angoisses en 6 sÚances: Paniques, phobies, com...
+        10 featured / 0 nÚgatifs / 0 retenus aprÞs filtre qualitÚ
