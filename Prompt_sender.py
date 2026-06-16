@@ -18,6 +18,7 @@ import sys
 import json
 import time
 import argparse
+import re
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -30,7 +31,8 @@ except ImportError:
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "Config.json"
 HTML_DUMP_PATH      = Path(__file__).parent / "debug_empty_response.html"
-PLACEHOLDERS_URL    = Path(__file__).parent / "placeholders.json"
+PLACEHOLDERS_URL = "https://raw.githubusercontent.com/Mrluken0/E-Books/main/placeholders.json"
+
 
 def load_config(config_path):
     with open(config_path, "r", encoding="utf-8") as f:
@@ -118,6 +120,23 @@ def wait_for_response(page, selectors, timeout=120):
     placeholders = load_placeholders()
 
     while time.time() - start_time < timeout:
+        # Check rate limit en cours de génération
+        page_text = page.inner_text("body").lower()
+        rate_limit_keywords = ["réinitialise", "plus de messages gratuits", "reached your usage limit"]
+        for keyword in rate_limit_keywords:
+            if keyword in page_text:
+                time_match = re.search(
+                    r'(?:réinitialis[ée](?:s)?\s+[àa]\s+|jusqu(?:\'|\u2019)à\s+)(\d{1,2}:\d{2})',
+                    page_text
+                )
+                reset_time = time_match.group(1) if time_match else None
+                print(json.dumps({
+                    "status": "rate_limit",
+                    "message": "Limite atteinte",
+                    "reset_time": reset_time
+                }, ensure_ascii=False), flush=True)
+                sys.exit(1)
+
         # Sécurité : vérifier si Claude a fini de générer en regardant les boutons de l'interface
         # Tant que le bouton de stop [aria-label="Stop generating"] ou [aria-label="Interrompre"] existe, l'animation tourne
         is_generating = page.evaluate("""
