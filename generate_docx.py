@@ -31,27 +31,24 @@ sys.stderr.reconfigure(encoding='utf-8')
 
 def add_toc_field(paragraph):
     """Injecte le champ XML pour la table des matières automatique de Word."""
-    # Début du champ
+    run = paragraph.add_run()
+    
     fld_char1 = OxmlElement('w:fldChar')
     fld_char1.set(qn('w:fldCharType'), 'begin')
-    
-    # Code du champ TOC
+    run._r.append(fld_char1)
+
     instr_text = OxmlElement('w:instrText')
     instr_text.set(qn('xml:space'), 'preserve')
     instr_text.text = 'TOC \\o "1-2" \\h \\z \\u'
-    
-    # Séparateur
+    run._r.append(instr_text)
+
     fld_char2 = OxmlElement('w:fldChar')
     fld_char2.set(qn('w:fldCharType'), 'separate')
-    
-    # Fin du champ
+    run._r.append(fld_char2)
+
     fld_char3 = OxmlElement('w:fldChar')
     fld_char3.set(qn('w:fldCharType'), 'end')
-    
-    paragraph._p.append(fld_char1)
-    paragraph._p.append(instr_text)
-    paragraph._p.append(fld_char2)
-    paragraph._p.append(fld_char3)
+    run._r.append(fld_char3)
 
 def configure_styles(doc):
     """Configure la police Georgia et les tailles demandées sur les styles de base."""
