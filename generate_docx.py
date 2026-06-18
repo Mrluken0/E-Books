@@ -29,36 +29,34 @@ except ImportError:
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
-def add_toc_field(paragraph):
-    """Injecte le champ XML pour la table des matières automatique de Word."""
-    run = paragraph.add_run()
-    
-    fld_char1 = OxmlElement('w:fldChar')
-    fld_char1.set(qn('w:fldCharType'), 'begin')
-    run._r.append(fld_char1)
+def ensure_toc_styles(doc):
+    """Crée les styles 'TOC 1' et 'TOC 2' s'ils n'existent pas (basedOn Normal, indent gauche progressif)."""
+    from docx.enum.style import WD_STYLE_TYPE
+    styles = doc.styles
+    base = styles['Normal']
+    # (nom de style, indentation gauche en points)
+    for name, indent_pt in (("TOC 1", 0), ("TOC 2", 18)):
+        try:
+            style = styles[name]
+        except KeyError:
+            style = styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+            style.base_style = base
+        style.paragraph_format.left_indent = Pt(indent_pt)
 
-    instr_text = OxmlElement('w:instrText')
-    instr_text.set(qn('xml:space'), 'preserve')
-    instr_text.text = 'TOC \\o "1-2" \\h \\z \\u'
-    run._r.append(instr_text)
+def generate_toc_entries(doc, chapitres_data):
+    """Génère une table des matières STATIQUE (sans champ Word) à partir des chapitres.
 
-    fld_char2 = OxmlElement('w:fldChar')
-    fld_char2.set(qn('w:fldCharType'), 'separate')
-    run._r.append(fld_char2)
-
-    fld_char3 = OxmlElement('w:fldChar')
-    fld_char3.set(qn('w:fldCharType'), 'end')
-    run._r.append(fld_char3)
-
-def enable_update_fields(doc):
-    """Force Word à recalculer les champs (dont la table des matières) à l'ouverture."""
-    settings = doc.settings.element
-    # Évite les doublons si appelé plusieurs fois
-    existing = settings.find(qn('w:updateFields'))
-    if existing is None:
-        update_fields = OxmlElement('w:updateFields')
-        update_fields.set(qn('w:val'), 'true')
-        settings.append(update_fields)
+    Visible immédiatement à l'ouverture, sans mise à jour des champs (compatible KDP).
+    """
+    ensure_toc_styles(doc)
+    for chap in chapitres_data:
+        num = chap.get("numero", 1)
+        c_titre = chap.get("titre", "").strip()
+        doc.add_paragraph(f"Chapitre {num} — {c_titre}", style="TOC 1")
+        for sub in chap.get("sous_chapitres", []):
+            s_titre = sub.get("titre", "").strip()
+            if s_titre:
+                doc.add_paragraph(s_titre, style="TOC 2")
 
 def configure_styles(doc):
     """Configure la police Georgia et les tailles demandées sur les styles de base."""
@@ -177,7 +175,6 @@ def main():
 
         doc = docx.Document()
         configure_styles(doc)
-        enable_update_fields(doc)
         
         # --- 1. PAGE DE TITRE ---
         p_titre = doc.add_paragraph()
@@ -213,15 +210,7 @@ def main():
         # --- 4. SAUT DE PAGE ---
         doc.add_page_break()
         
-        # --- 5. TABLE DES MATIÈRES ---
-        doc.add_heading("Table des matières", level=1)
-        p_toc = doc.add_paragraph()
-        add_toc_field(p_toc)
-        
-        # --- 6. SAUT DE PAGE ---
-        doc.add_page_break()
-        
-        # --- 7. CHARGEMENT ET SÉLECTION DES CHAPITRES ---
+        # --- 5. CHARGEMENT ET SÉLECTION DES CHAPITRES (avant la TOC) ---
         json_pattern = os.path.join(chapitres_dir, "chapitre_*.json")
         chapitre_files = glob.glob(json_pattern)
 
@@ -242,10 +231,17 @@ def main():
                         chapitres_data.append(c_data)
             except Exception as e:
                 sys.stderr.write(f"Warning: Impossible de lire le fichier {file_path}: {str(e)}\n")
-        
+
         # Tri strict par numéro
         chapitres_data.sort(key=lambda x: int(x["numero"]))
-        
+
+        # --- 6. TABLE DES MATIÈRES (statique, visible sans mise à jour Word) ---
+        doc.add_heading("Table des matières", level=1)
+        generate_toc_entries(doc, chapitres_data)
+
+        # --- 7. SAUT DE PAGE ---
+        doc.add_page_break()
+
         # Insertion des chapitres
         for chap in chapitres_data:
             num = chap.get("numero", 1)
