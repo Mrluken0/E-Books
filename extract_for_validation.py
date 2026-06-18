@@ -33,12 +33,16 @@ def normal_texts_after(paragraphs, start_index, count):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--docx', required=True, help='Chemin vers le fichier .docx')
+    parser.add_argument('--config', required=True, help='Chemin vers book_config.json')
     args = parser.parse_args()
+
+    with open(args.config, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    docx_path = config['output_path']
 
     try:
         # 1. Lecture du document
-        doc = docx.Document(args.docx)
+        doc = docx.Document(docx_path)
 
         # Indexation des paragraphes (style + texte)
         paragraphs = []
