@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json
 import glob
@@ -84,6 +85,8 @@ def clean_markdown(text):
     """Nettoie les syntaxes Markdown courantes en préservant le texte brut des titres."""
     if not text:
         return ""
+    # Convertit les balises HTML <br>, <br/>, <br /> (et <br><br>) en sauts de ligne
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
     lines = text.split('\n')
     cleaned_lines = []
     for line in lines:
@@ -105,6 +108,30 @@ def clean_markdown(text):
             
         cleaned_lines.append(line)
     return '\n'.join(cleaned_lines).strip()
+
+def add_paragraph_with_markdown(doc, texte, style='Normal'):
+    """Ajoute du texte de chapitre en interprétant le markdown inline.
+
+    - Nettoie le markdown (titres, puces, tableaux, <br> -> saut de ligne).
+    - Crée un paragraphe par ligne non vide.
+    - Applique réellement le gras **...** via des runs distincts (run.bold = True).
+    """
+    cleaned = clean_markdown(texte)
+    if not cleaned:
+        return
+    for line in cleaned.split('\n'):
+        if not line.strip():
+            continue
+        p = doc.add_paragraph(style=style)
+        # Découpe la ligne en alternant segments **gras** et texte normal
+        for segment in re.split(r'(\*\*.+?\*\*)', line):
+            if not segment:
+                continue
+            if segment.startswith('**') and segment.endswith('**') and len(segment) > 4:
+                run = p.add_run(segment[2:-2])
+                run.bold = True
+            else:
+                p.add_run(segment)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -252,21 +279,21 @@ def main():
             
             # Introduction
             if chap.get("introduction"):
-                doc.add_paragraph(clean_markdown(chap["introduction"]), style='Normal')
-                
+                add_paragraph_with_markdown(doc, chap["introduction"], style='Normal')
+
             # Sous-chapitres
             for sub in chap.get("sous_chapitres", []):
                 s_titre = sub.get("titre", "").strip()
                 s_contenu = sub.get("contenu", "")
-                
+
                 if s_titre:
                     doc.add_heading(s_titre, level=2)
                 if s_contenu:
-                    doc.add_paragraph(clean_markdown(s_contenu), style='Normal')
-            
+                    add_paragraph_with_markdown(doc, s_contenu, style='Normal')
+
             # Conclusion
             if chap.get("conclusion"):
-                doc.add_paragraph(clean_markdown(chap["conclusion"]), style='Normal')
+                add_paragraph_with_markdown(doc, chap["conclusion"], style='Normal')
                 
             # Saut de page après chaque chapitre
             doc.add_page_break()
