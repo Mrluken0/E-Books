@@ -117,7 +117,54 @@ def main():
         bio = config.get("auteur_bio", "").strip()
         chapitres_dir = config.get("chapitres_dir", "")
         output_path = config.get("output_path", "")
-        
+
+        # --- 0. DIAGNOSTIC DOSSIER CHAPITRES ---
+        LIVRES_ROOT = "C:/Users/luken/.n8n-files/Livres/"
+        diag_pattern = os.path.join(chapitres_dir, "chapitre_*.json")
+
+        sys.stderr.write("=== DIAGNOSTIC CHAPITRES ===\n")
+        sys.stderr.write(f"chapitres_dir (config): {chapitres_dir}\n")
+        sys.stderr.write(f"os.path.exists(chapitres_dir): {os.path.exists(chapitres_dir)}\n")
+
+        dossiers_disponibles = []
+        if os.path.exists(LIVRES_ROOT):
+            try:
+                dossiers_disponibles = os.listdir(LIVRES_ROOT)
+            except Exception as e:
+                sys.stderr.write(f"Erreur listing {LIVRES_ROOT}: {str(e)}\n")
+        else:
+            sys.stderr.write(f"ATTENTION: racine introuvable: {LIVRES_ROOT}\n")
+
+        sys.stderr.write(f"Contenu de {LIVRES_ROOT} ({len(dossiers_disponibles)}):\n")
+        for d in dossiers_disponibles:
+            sys.stderr.write(f"  - {d}\n")
+
+        sys.stderr.write(f"glob pattern: {diag_pattern}\n")
+        glob_initial = glob.glob(diag_pattern)
+        sys.stderr.write(f"glob.glob() -> {len(glob_initial)} fichier(s):\n")
+        for f_found in glob_initial:
+            sys.stderr.write(f"  - {f_found}\n")
+
+        # --- FALLBACK: recherche d'un dossier approchant ---
+        if not glob_initial:
+            sys.stderr.write("Aucun chapitre via le dossier exact. Recherche d'un fallback...\n")
+            fallback_dir = None
+            for d in dossiers_disponibles:
+                full = os.path.join(LIVRES_ROOT, d)
+                if not os.path.isdir(full):
+                    continue
+                low = d.lower()
+                if "tete" in low or "hors" in low:
+                    fallback_dir = full
+                    sys.stderr.write(f"Dossier fallback retenu: {full}\n")
+                    break
+            if fallback_dir:
+                chapitres_dir = fallback_dir
+            else:
+                sys.stderr.write("Aucun dossier fallback approchant trouve.\n")
+        sys.stderr.write("=== FIN DIAGNOSTIC ===\n")
+        sys.stderr.flush()
+
         doc = docx.Document()
         configure_styles(doc)
         
@@ -166,7 +213,15 @@ def main():
         # --- 7. CHARGEMENT ET SÉLECTION DES CHAPITRES ---
         json_pattern = os.path.join(chapitres_dir, "chapitre_*.json")
         chapitre_files = glob.glob(json_pattern)
-        
+
+        if not chapitre_files:
+            dispo = ", ".join(dossiers_disponibles) if dossiers_disponibles else "(aucun)"
+            print(json.dumps({
+                "status": "error",
+                "message": f"Aucun chapitre trouvé. Dossiers disponibles: [{dispo}]"
+            }, ensure_ascii=False))
+            sys.exit(1)
+
         chapitres_data = []
         for file_path in chapitre_files:
             try:
