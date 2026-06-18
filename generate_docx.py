@@ -31,8 +31,6 @@ sys.stderr.reconfigure(encoding='utf-8')
 
 def add_toc_field(paragraph):
     """Injecte le champ XML pour la table des matières automatique de Word."""
-    p_pr = paragraph._p.get_or_add_pPr()
-    
     # Début du champ
     fld_char1 = OxmlElement('w:fldChar')
     fld_char1.set(qn('w:fldCharType'), 'begin')
@@ -78,21 +76,28 @@ def configure_styles(doc):
     font_h2.bold = True
 
 def clean_markdown(text):
-    """Nettoie grossièrement les syntaxes Markdown courantes pour le texte brut."""
+    """Nettoie les syntaxes Markdown courantes en préservant le texte brut des titres."""
     if not text:
         return ""
     lines = text.split('\n')
     cleaned_lines = []
     for line in lines:
-        # Ignore les titres MD (ex: ## Titre)
-        if line.strip().startswith('#'):
+        stripped = line.strip()
+        
+        # Si c'est un titre MD (ex: ### Sous-titre interne), on garde le texte sans les #
+        if stripped.startswith('#'):
+            cleaned_line = stripped.lstrip('#').strip()
+            cleaned_lines.append(cleaned_line)
             continue
+            
         # Enlève les puces de liste MD basiques (* ou -)
-        if line.strip().startswith('* ') or line.strip().startswith('- '):
-            line = line.strip()[2:]
-        # Ignore les lignes de tableaux MD
+        if stripped.startswith('* ') or stripped.startswith('- '):
+            line = stripped[2:]
+            
+        # Ignore les lignes de séparation de tableaux MD
         if '|' in line and '---' in line:
             continue
+            
         cleaned_lines.append(line)
     return '\n'.join(cleaned_lines).strip()
 
@@ -122,7 +127,6 @@ def main():
         # --- 1. PAGE DE TITRE ---
         p_titre = doc.add_paragraph()
         p_titre.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        # Ajout d'espaces avant pour centrer verticalement un minimum
         p_titre.paragraph_format.space_before = Pt(120)
         run_titre = p_titre.add_run(titre)
         run_titre.font.size = Pt(24)
@@ -171,7 +175,6 @@ def main():
             try:
                 with open(file_path, 'r', encoding='utf-8') as cf:
                     c_data = json.load(cf)
-                    # S'assurer qu'un numéro existe pour le tri
                     if "numero" in c_data:
                         chapitres_data.append(c_data)
             except Exception as e:
