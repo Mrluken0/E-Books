@@ -50,6 +50,16 @@ def add_toc_field(paragraph):
     fld_char3.set(qn('w:fldCharType'), 'end')
     run._r.append(fld_char3)
 
+def enable_update_fields(doc):
+    """Force Word à recalculer les champs (dont la table des matières) à l'ouverture."""
+    settings = doc.settings.element
+    # Évite les doublons si appelé plusieurs fois
+    existing = settings.find(qn('w:updateFields'))
+    if existing is None:
+        update_fields = OxmlElement('w:updateFields')
+        update_fields.set(qn('w:val'), 'true')
+        settings.append(update_fields)
+
 def configure_styles(doc):
     """Configure la police Georgia et les tailles demandées sur les styles de base."""
     # Style Normal
@@ -167,6 +177,7 @@ def main():
 
         doc = docx.Document()
         configure_styles(doc)
+        enable_update_fields(doc)
         
         # --- 1. PAGE DE TITRE ---
         p_titre = doc.add_paragraph()
