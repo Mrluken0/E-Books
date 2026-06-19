@@ -390,7 +390,7 @@ def main():
             page = context.new_page()
 
             log("Navigation vers KDP Setup...")
-            page.goto("https://kdp.amazon.com/en_US/title-setup/kindle/new/details")
+            page.goto("https://kdp.amazon.com/fr_FR/title-setup/kindle/new/details")
 
             # Déroulement du workflow
             fill_book_details(page, config)
