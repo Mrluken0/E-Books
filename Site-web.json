@@ -1,0 +1,11 @@
+{
+  "KDP.amazon.fr" : {
+    "url": "https://kdp.amazon.fr",
+    "selectors": {
+    },
+    "submit_key":"",
+    "response_selector": "",
+    "response_timeout": 120,
+    "wait_before_type": 3.0
+  }
+}
