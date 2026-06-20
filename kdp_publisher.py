@@ -13,6 +13,23 @@ HEADLESS = False  # Passer à True une fois le script stabilisé en prod
 PROFILE_PATH = r"C:\Users\luken\AppData\Local\ms-playwright\kdp-profile"
 TIMEOUT = 30000  # 30 secondes
 
+# URL du formulaire de création d'un ebook (site FR)
+KDP_NEW_EBOOK_URL = "https://kdp.amazon.com/fr_FR/title-setup/kindle/new/details"
+
+# Le <select> langue de KDP utilise des libellés natifs ("french", "english"...),
+# PAS les codes ISO ("fr", "en"). Mapping des codes config -> valeurs KDP.
+# (vérifié en live sur #data-language-native)
+LANG_MAP = {
+    "fr": "french",
+    "en": "english",
+    "de": "german",
+    "es": "spanish",
+    "it": "italian",
+    "pt": "portuguese",
+    "nl": "dutch",
+    "ja": "japanese",
+}
+
 
 def log(message):
     """Écrit les logs intermédiaires sur stderr pour ne pas polluer stdout."""
@@ -25,6 +42,50 @@ def read_config(path):
         raise FileNotFoundError(f"Le fichier de configuration {path} n'existe pas.")
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+
+def ensure_logged_in(page, config):
+    """
+    Vérifie qu'on est bien connecté à KDP. Avec le profil persistant kdp-profile,
+    la session reste valide longtemps : aucun login dans le code en temps normal.
+
+    Si la session a expiré, KDP redirige vers /ap/signin.
+
+    ┌──────────────────────────────────────────────────────────────────────┐
+    │ >>> ZONE LOGIN — À CODER PAR TOI <<<                                   │
+    │                                                                        │
+    │ Sélecteurs STANDARD Amazon (à confirmer en live, non vérifiés ici) :   │
+    │   - Champ email/login ......... #ap_email   (ou #ap_email_login)        │
+    │   - Bouton "Continuer" ........ #continue                               │
+    │   - Champ mot de passe ........ #ap_password                           │
+    │   - Bouton "Se connecter" ..... #signInSubmit                          │
+    │   - (2FA éventuel OTP) ......... #auth-mfa-otpcode + #auth-signin-button│
+    │                                                                        │
+    │ Récupère email/mdp depuis une source SÉCURISÉE (variable d'env n8n,    │
+    │ fichier hors repo, gestionnaire de secrets) — JAMAIS en clair dans     │
+    │ kdp_config.json qui est poussé sur GitHub.                             │
+    │                                                                        │
+    │ Exemple de structure à compléter :                                     │
+    │   page.fill("#ap_email", os.environ["KDP_EMAIL"])                      │
+    │   page.click("#continue")                                              │
+    │   page.fill("#ap_password", os.environ["KDP_PASSWORD"])                │
+    │   page.click("#signInSubmit")                                          │
+    │   # gérer ici un éventuel code 2FA...                                   │
+    └──────────────────────────────────────────────────────────────────────┘
+    """
+    if "/ap/signin" not in page.url:
+        return  # déjà connecté via le profil persistant
+
+    log("Session KDP expirée — page de connexion détectée.")
+
+    # >>> Insère ICI ton code de connexion (voir docstring ci-dessus). <<<
+
+    # Garde-fou tant que le login n'est pas implémenté : on échoue proprement
+    # pour que n8n puisse t'alerter (reconnexion manuelle dans kdp-profile).
+    raise Exception(
+        "Session KDP expirée — reconnexion manuelle requise dans le profil "
+        "kdp-profile (ou implémenter ensure_logged_in)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -44,53 +105,52 @@ def fill_book_details(page, config):
         log(f"Mots-clés préparés ({len(mots_cles)}) : {mots_cles}")
 
         # =====================================================================
-        # >>> PAUSE 1 : DÉTAILS DU LIVRE
-        # À inspecter en live dans le DevTools (clic droit > Inspecter) :
-        #   - Sélecteur LANGUE          (ex: #data-print-book-language-native ?)
-        #   - Sélecteur TITRE           (ex: #data-print-book-title ?)
-        #   - Sélecteur SOUS-TITRE      (ex: #data-print-book-subtitle ?)
-        #   - Sélecteur AUTEUR PRÉNOM   (ex: #data-print-book-primary-author-first-name ?)
-        #   - Sélecteur AUTEUR NOM      (ex: #data-print-book-primary-author-last-name ?)
-        #   - Sélecteur DROITS "je possède les droits"
-        #   - Sélecteurs 7 champs MOTS-CLÉS
-        #   - Bouton + modal CATÉGORIES
-        #   - Radio CONTENU EXPLICITE = Non
-        #   - Bouton "Enregistrer et continuer"
-        # Variables dispo pour tester dans la console pause :
-        #   config["langue"], config["titre_livre"], config.get("sous_titre"),
-        #   prenom, nom, config["description"], mots_cles, config["categories"]
+        # SÉLECTEURS VÉRIFIÉS EN LIVE (KDP fr_FR, ebook, 2026-06) :
+        #   Langue        : #data-language-native (select, valeurs natives via LANG_MAP)
+        #   Titre         : #data-title
+        #   Sous-titre    : #data-subtitle
+        #   Auteur prénom : #data-primary-author-first-name
+        #   Auteur nom    : #data-primary-author-last-name
+        #   Description   : CKEditor instance "editor1" (voir _fill_description)
+        #   Droits (perso): #non-public-domain (radio "Je détiens les droits...")
+        #   Mots-clés     : #data-keywords-0 .. #data-keywords-6
+        #   Contenu adulte: input[name="data[is_adult_content]-radio"][value="false"]
+        #   Catégories    : bouton #categories-modal-button (modal à mapper, voir TODO)
+        #   Continuer     : #save-and-continue   (brouillon : #save)
         # =====================================================================
-        log(">>> PAUSE 1 : identifier les sélecteurs de la page DÉTAILS du livre")
-        page.pause()
 
-        # -------------------------------------------------------------------
-        # TEMPLATE à dé-commenter et compléter avec les VRAIS sélecteurs :
-        #
-        # page.wait_for_selector("SELECTOR_LANGUE", timeout=TIMEOUT)
-        # page.select_option("SELECTOR_LANGUE", value=config.get("langue", "fr"))
-        #
-        # page.fill("SELECTOR_TITRE", config["titre_livre"])
-        # if config.get("sous_titre"):
-        #     page.fill("SELECTOR_SOUS_TITRE", config["sous_titre"])
-        #
-        # page.fill("SELECTOR_AUTEUR_PRENOM", prenom)
-        # page.fill("SELECTOR_AUTEUR_NOM", nom)
-        #
-        # _fill_description(page, config["description"])   # voir helper dédié
-        #
-        # page.check("SELECTOR_DROITS_OWN")
-        #
-        # for i, mot in enumerate(mots_cles):
-        #     page.fill(f"SELECTOR_KEYWORD_{i}", mot)
-        #
-        # page.click("SELECTOR_CATEGORIES_BUTTON")
-        # page.wait_for_selector("SELECTOR_CATEGORY_DIALOG", timeout=TIMEOUT)
-        # ... navigation dans l'arbre des catégories ...
-        # page.click("SELECTOR_CATEGORY_SAVE")
-        #
-        # page.check("SELECTOR_ADULT_CONTENT_NO")
-        # page.click("SELECTOR_SAVE_AND_CONTINUE")
-        # -------------------------------------------------------------------
+        # --- Langue ---
+        page.wait_for_selector("#data-language-native", timeout=TIMEOUT)
+        langue_kdp = LANG_MAP.get(config.get("langue", "fr").lower(), "french")
+        page.select_option("#data-language-native", value=langue_kdp)
+
+        # --- Titre / sous-titre ---
+        page.fill("#data-title", config["titre_livre"])
+        if config.get("sous_titre"):
+            page.fill("#data-subtitle", config["sous_titre"])
+
+        # --- Auteur principal ---
+        page.fill("#data-primary-author-first-name", prenom)
+        page.fill("#data-primary-author-last-name", nom)
+
+        # --- Description (CKEditor, voir helper dédié) ---
+        _fill_description(page, config["description"])
+
+        # --- Droits de publication : je détiens les droits ---
+        page.check("#non-public-domain")
+
+        # --- Mots-clés (7 champs) ---
+        for i, mot in enumerate(mots_cles):
+            page.fill(f"#data-keywords-{i}", mot)
+
+        # --- Contenu pour public adulte : Non ---
+        page.check('input[name="data[is_adult_content]-radio"][value="false"]')
+
+        # --- Rubriques + classement (modal) ---
+        select_categories(page, config)
+
+        # --- Enregistrer et continuer vers l'étape Contenu ---
+        page.click("#save-and-continue")
 
     except TimeoutError as e:
         raise Exception(f"Timeout étape 1 (détails livre) — sélecteur introuvable : {str(e)}")
@@ -102,76 +162,239 @@ def fill_book_details(page, config):
 
 def _fill_description(page, description):
     """
-    Remplit la description KDP en gérant les deux cas :
-      1. Éditeur rich text TinyMCE (cas le plus fréquent sur KDP)
-      2. Fallback : textarea classique
+    Remplit la description KDP.
 
-    À FINALISER après inspection : adapter le nom/sélecteur de l'iframe TinyMCE
-    et le sélecteur du textarea de secours.
+    /!\\ Vérifié en live : KDP utilise CKEditor (et NON TinyMCE).
+    Instance CKEditor = "editor1", iframe d'édition = iframe.cke_wysiwyg_frame,
+    input caché synchronisé = [name="data[description]"].
+
+    Stratégie :
+      1. API CKEditor : CKEDITOR.instances.editor1.setData(...) — le plus fiable,
+         ça met aussi à jour l'input caché du formulaire.
+      2. Fallback : écrire directement dans le <body> de l'iframe CKEditor.
     """
-    log(">>> PAUSE (description) : identifier l'éditeur (TinyMCE iframe vs textarea)")
-    page.pause()
+    log("Remplissage de la description (CKEditor)...")
+    safe_desc = json.dumps(description)  # échappe quotes / sauts de ligne pour le JS
 
-    # -------------------------------------------------------------------
-    # TEMPLATE — cas 1 : TinyMCE présent
-    #
-    # Échapper la description pour l'injection JS via json.dumps
-    # safe_desc = json.dumps(description)
-    # try:
-    #     # L'API TinyMCE est globale sur la page parente, pas dans l'iframe.
-    #     page.evaluate(f"tinymce.activeEditor.setContent({safe_desc})")
-    #     return
-    # except Exception:
-    #     pass
-    #
-    # # TEMPLATE — cas 1bis : remplir directement le <body> de l'iframe TinyMCE
-    # iframe_loc = page.locator("SELECTOR_TINYMCE_IFRAME")
-    # if iframe_loc.count() > 0:
-    #     frame = iframe_loc.content_frame
-    #     frame.fill("body", description)
-    #     return
-    #
-    # # TEMPLATE — cas 2 : fallback textarea classique
-    # page.fill("SELECTOR_DESCRIPTION_TEXTAREA", description)
-    # -------------------------------------------------------------------
+    # --- 1) Voie privilégiée : API CKEditor ---
+    ok = page.evaluate(
+        """(html) => {
+            try {
+                if (window.CKEDITOR && CKEDITOR.instances && CKEDITOR.instances.editor1) {
+                    CKEDITOR.instances.editor1.setData(html);
+                    return true;
+                }
+            } catch (e) {}
+            return false;
+        }""",
+        description,
+    )
+    if ok:
+        return
+
+    # --- 2) Fallback : <body> de l'iframe d'édition CKEditor ---
+    log("API CKEditor indisponible — fallback iframe.cke_wysiwyg_frame")
+    frame = page.frame_locator("iframe.cke_wysiwyg_frame")
+    frame.locator("body").fill(description)
+    _ = safe_desc  # conservé si besoin d'une injection JS manuelle ultérieure
+
+
+def _normalize_categories(categories):
+    """
+    Normalise config["categories"] en liste de chemins (listes de segments).
+
+    Accepte :
+      - une chaîne unique : "Santé et Bien-être > Psychologie ... > Psychologie appliquée"
+      - une liste de chaînes : [".. > ..", ".. > .."]
+    Pour chaque chemin, le DERNIER segment = le classement (case feuille),
+    les précédents = la cascade de menus déroulants (rubrique, rubrique secondaire...).
+    """
+    if isinstance(categories, str):
+        categories = [categories]
+    paths = []
+    for cat in categories:
+        segments = [s.strip() for s in cat.split(">") if s.strip()]
+        if segments:
+            paths.append(segments)
+    return paths
+
+
+def select_categories(page, config):
+    """
+    Sélectionne les rubriques + le classement via la modal KDP.
+
+    Mécanique vérifiée en live (KDP fr_FR, ebook) :
+      - Bouton d'ouverture : #categories-modal-button
+      - Modal              : .a-popover-modal
+      - Cascade            : <select> natifs React ; le TEXTE de l'option = le nom
+                             de la rubrique -> on sélectionne par label (robuste,
+                             indépendant du JSON {level,key,nodeId} en value).
+      - Classement final   : case à cocher (feuille) -> alimente
+                             data[selected_browse_nodes][N][id].
+
+    /!\\ À CONFIRMER en live (laissé volontairement souple) :
+      - libellé exact du bouton de validation de la modal
+      - libellé du lien "Ajouter une rubrique" pour les rubriques 2 et 3
+    """
+    cats = config.get("categories")
+    if not cats:
+        log("Aucune rubrique fournie — étape catégories ignorée.")
+        return
+
+    paths = _normalize_categories(cats)
+    log(f"Rubriques à sélectionner : {paths}")
+
+    page.click("#categories-modal-button")
+    modal = page.locator(".a-popover-modal").last
+    modal.wait_for(state="visible", timeout=TIMEOUT)
+
+    for idx, segments in enumerate(paths):
+        if idx > 0:
+            # Rubriques 2 et 3 : révéler une nouvelle ligne de cascade.
+            # KDP affiche un lien type "Ajouter une rubrique".
+            _add_category_row(modal)
+
+        *cascade, classement = segments
+
+        # 1) Cascade : sélectionner chaque rubrique dans le prochain <select> dispo.
+        for niveau, nom in enumerate(cascade):
+            _select_cascade_level(modal, niveau_global=_cascade_index(modal), label=nom)
+
+        # 2) Classement : cocher la feuille correspondante.
+        _check_classement(modal, classement)
+
+    # Valider la modal. Le bouton de confirmation KDP est un bouton de footer ;
+    # on le cible par son rôle/texte pour rester robuste aux ids dynamiques.
+    _confirm_categories_modal(modal)
+
+
+def _cascade_index(modal):
+    """Nombre de <select> de cascade déjà présents/visibles (pour viser le suivant)."""
+    return modal.locator("select:visible").count()
+
+
+def _select_cascade_level(modal, niveau_global, label):
+    """
+    Sélectionne `label` dans le prochain menu déroulant de cascade, puis attend
+    que le niveau suivant (ou les cases de classement) se charge via XHR.
+    """
+    # Le dernier <select> visible est celui à remplir pour le niveau courant.
+    sel = modal.locator("select:visible").last
+    sel.select_option(label=label)
+    # Laisse l'appel get-child-nodes peupler le niveau suivant.
+    modal.page.wait_for_timeout(1200)
+
+
+def _check_classement(modal, classement):
+    """Coche la case de classement (feuille) dont le label correspond."""
+    # Case à cocher repérée par le texte de son label, dans la modal.
+    case = modal.get_by_label(classement, exact=False)
+    case.wait_for(state="visible", timeout=TIMEOUT)
+    case.check()
+
+
+def _add_category_row(modal):
+    """
+    Révèle une ligne de rubrique supplémentaire (rubriques 2 et 3).
+    À confirmer en live : libellé exact du lien (ex: "Ajouter une rubrique").
+    """
+    lien = modal.get_by_text("Ajouter une rubrique", exact=False)
+    if lien.count() > 0:
+        lien.first.click()
+        modal.page.wait_for_timeout(800)
+
+
+def _confirm_categories_modal(modal):
+    """
+    Valide la modal des rubriques.
+    À confirmer en live : libellé exact ("Enregistrer", "Confirmer", "Valider"...).
+    On essaie plusieurs libellés courants pour rester robuste.
+    """
+    for libelle in ("Enregistrer", "Confirmer", "Valider", "Terminé"):
+        bouton = modal.get_by_role("button", name=libelle)
+        if bouton.count() > 0:
+            bouton.first.click()
+            return
+    # Fallback : bouton primaire du footer de la modal.
+    modal.locator(".a-button-primary").last.click()
 
 
 # ---------------------------------------------------------------------------
 # ÉTAPE 2 — UPLOAD DU MANUSCRIT
 # ---------------------------------------------------------------------------
 def upload_content(page, config):
-    """Upload du fichier .docx et attente de la confirmation."""
-    log("Étape 2 : Upload du manuscrit...")
+    """
+    Étape 2 (page /content) : déclaration contenu IA, DRM, upload du manuscrit.
+
+    Sélecteurs vérifiés en live (KDP fr_FR, ebook) :
+      Manuscrit (input caché) : #data-assets-interior-file-upload-AjaxInput
+      Succès upload           : #data-assets-interior-file-upload-success
+      Échec upload            : #data-assets-interior-file-upload-failure
+      DRM (radios)            : input[name="data[is_drm]-radio"][value="true|false"]
+      Contenu IA (3 selects)  : #generative-ai-questionnaire-text / -images / -translations
+    """
+    log("Étape 2 : Contenu (IA, DRM, manuscrit)...")
     try:
+        page.wait_for_selector("#data-assets-interior-file-upload-AjaxInput", timeout=TIMEOUT)
+
+        # --- Déclaration de contenu généré par IA (OBLIGATOIRE pour continuer) ---
+        _fill_ai_questionnaire(page, config)
+
+        # --- DRM (Gestion des droits numériques) ---
+        # Valeur pilotée par la config ; défaut = ne pas activer le DRM (False).
+        drm_value = "true" if config.get("drm", False) else "false"
+        page.check(f'input[name="data[is_drm]-radio"][value="{drm_value}"]')
+
+        # --- Upload du manuscrit ---
         docx_path = os.path.abspath(config["docx_path"])
         if not os.path.exists(docx_path):
             raise FileNotFoundError(f"Fichier manuscrit introuvable : {docx_path}")
         log(f"Manuscrit à uploader : {docx_path}")
 
-        # =====================================================================
-        # >>> PAUSE 2 : UPLOAD MANUSCRIT
-        # À inspecter :
-        #   - <input type="file"> du manuscrit (souvent caché, viser l'input
-        #     et non le bouton stylisé)
-        #   - Élément/texte de confirmation de fin d'upload
-        # Variable dispo : docx_path
-        # =====================================================================
-        log(">>> PAUSE 2 : identifier l'input file manuscrit + message de succès")
-        page.pause()
+        page.set_input_files("#data-assets-interior-file-upload-AjaxInput", docx_path)
+        log("Téléchargement du manuscrit en cours...")
 
-        # -------------------------------------------------------------------
-        # TEMPLATE :
-        # page.set_input_files("SELECTOR_MANUSCRIPT_INPUT", docx_path)
-        # log("Téléchargement du manuscrit en cours...")
-        # page.wait_for_selector("SELECTOR_UPLOAD_SUCCESS", timeout=120000)
-        # -------------------------------------------------------------------
+        # Attente du résultat : succès OU échec (course entre les deux alertes).
+        page.wait_for_selector(
+            "#data-assets-interior-file-upload-success", state="visible", timeout=180000
+        )
+        log("Manuscrit téléchargé avec succès.")
 
     except FileNotFoundError:
         raise
     except TimeoutError as e:
+        # Si l'alerte d'échec est visible, remonter son message.
+        fail = page.locator("#data-assets-interior-file-upload-failure")
+        if fail.is_visible():
+            raise Exception(f"Échec upload manuscrit (KDP) : {fail.inner_text().strip()}")
         raise Exception(f"Timeout étape 2 (upload manuscrit) — confirmation non reçue : {str(e)}")
     except Exception as e:
         raise Exception(f"Erreur étape 2 (upload manuscrit) : {str(e)}")
+
+
+def _fill_ai_questionnaire(page, config):
+    """
+    Renseigne la déclaration de contenu généré par IA (obligatoire sur /content).
+
+    /!\\ Déclaration LÉGALE envers Amazon : aucune valeur par défaut trompeuse.
+    La config DOIT fournir les 3 réponses sous config["contenu_ia"] :
+      {
+        "texte":       "NONE|PARTIAL_AND_MINIMAL|PARTIAL_AND_EXTENSIVE|ENTIRE_AND_MINIMAL|ENTIRE_AND_EXTENSIVE",
+        "images":      "NONE|FEW_AND_MINIMAL|FEW_AND_EXTENSIVE|MANY_AND_MINIMAL|MANY_AND_EXTENSIVE",
+        "traductions": "NONE|PARTIAL_AND_MINIMAL|PARTIAL_AND_EXTENSIVE|ENTIRE_AND_MINIMAL|ENTIRE_AND_EXTENSIVE"
+      }
+    """
+    ia = config.get("contenu_ia")
+    if not ia or not all(k in ia for k in ("texte", "images", "traductions")):
+        raise Exception(
+            "Déclaration contenu IA manquante : renseigner config['contenu_ia'] "
+            "avec les clés 'texte', 'images', 'traductions' (déclaration obligatoire KDP)."
+        )
+
+    page.select_option("#generative-ai-questionnaire-text", value=ia["texte"])
+    page.select_option("#generative-ai-questionnaire-images", value=ia["images"])
+    page.select_option("#generative-ai-questionnaire-translations", value=ia["traductions"])
+    log(f"Déclaration IA : texte={ia['texte']}, images={ia['images']}, traductions={ia['traductions']}")
 
 
 # ---------------------------------------------------------------------------
@@ -179,57 +402,137 @@ def upload_content(page, config):
 # ---------------------------------------------------------------------------
 def use_cover_creator(context, page, config):
     """
-    Lance le Cover Creator. KDP peut l'ouvrir soit dans un NOUVEL ONGLET,
-    soit dans une iframe : on gère les deux cas.
+    Gère la couverture (toujours sur la page /content).
+
+    Deux modes selon la config :
+      1. config["couverture_path"] fourni  -> UPLOAD d'une couverture perso
+         (recommandé : fiable et entièrement automatisable).
+         Input caché vérifié : #data-assets-cover-file-upload-AjaxInput
+         (formats acceptés : .jpg/.jpeg/.tiff/.tif)
+      2. Sinon -> lancement du Créateur de Couverture KDP
+         Bouton vérifié : #data-assets-cover-cover-creator-cover-launch-button-announce
+         /!\\ Les écrans internes du studio ne sont PAS encore cartographiés
+         (template, validation) -> page.pause() à finaliser.
     """
-    log("Étape 2.2 : Création de la couverture via Cover Creator...")
+    log("Étape 2.2 : Couverture...")
     try:
-        # =====================================================================
-        # >>> PAUSE 2.2a : identifier le bouton de lancement du Cover Creator
-        # =====================================================================
-        log(">>> PAUSE 2.2a : identifier le bouton 'Lancer le Cover Creator'")
-        page.pause()
+        cover_path = config.get("couverture_path")
 
-        cc_page = None
-        # -------------------------------------------------------------------
-        # TEMPLATE — cas A : Cover Creator dans un NOUVEL ONGLET
-        # try:
-        #     with context.expect_page(timeout=TIMEOUT) as new_page_info:
-        #         page.click("SELECTOR_LAUNCH_COVER_CREATOR")
-        #     cc_page = new_page_info.value
-        #     cc_page.wait_for_load_state()
-        #     log("Cover Creator ouvert dans un nouvel onglet.")
-        # except TimeoutError:
-        #     # Pas de nouvel onglet → cas B : iframe sur la page courante
-        #     log("Pas de nouvel onglet, tentative via iframe...")
-        #     cc_frame = page.locator("SELECTOR_COVER_CREATOR_IFRAME").content_frame
-        #     cc_page = cc_frame  # le reste de l'API .click/.wait_for_selector est compatible
-        # -------------------------------------------------------------------
+        # --- Mode 1 : upload d'une couverture déjà prête ---
+        if cover_path:
+            cover_path = os.path.abspath(cover_path)
+            if not os.path.exists(cover_path):
+                raise FileNotFoundError(f"Couverture introuvable : {cover_path}")
+            log(f"Upload de la couverture : {cover_path}")
+            page.set_input_files("#data-assets-cover-file-upload-AjaxInput", cover_path)
+            page.wait_for_selector(
+                "#data-assets-cover-file-upload-success", state="visible", timeout=120000
+            )
+            log("Couverture téléchargée avec succès.")
+            return
 
-        # =====================================================================
-        # >>> PAUSE 2.2b : dans le Cover Creator, identifier :
-        #   - vignette de template à sélectionner
-        #   - bouton de validation / soumission du design
-        # Utiliser cc_page (onglet) OU cc_frame (iframe) selon le cas détecté.
-        # =====================================================================
-        log(">>> PAUSE 2.2b : identifier template + bouton de validation du Cover Creator")
-        page.pause()
+        # --- Mode 2 : Créateur de Couverture KDP ---
+        log("Lancement du Créateur de Couverture KDP...")
+        launch = "#data-assets-cover-cover-creator-cover-launch-button-announce"
+        page.wait_for_selector(launch, timeout=TIMEOUT)
 
-        # -------------------------------------------------------------------
-        # TEMPLATE :
-        # cc_page.wait_for_selector("SELECTOR_TEMPLATE_THUMB", timeout=TIMEOUT)
-        # cc_page.click("SELECTOR_TEMPLATE_THUMB")   # 1er template
-        # cc_page.click("SELECTOR_SUBMIT_COVER")
-        #
-        # # Retour page principale : attente du traitement de la couverture
-        # page.wait_for_selector("SELECTOR_COVER_UPLOAD_SUCCESS", timeout=120000)
-        # page.click("SELECTOR_SAVE_AND_CONTINUE")
-        # -------------------------------------------------------------------
+        # /!\ Vérifié en live : le studio NE s'ouvre PAS dans un nouvel onglet et
+        # n'est PAS une iframe. Il NAVIGUE LE MÊME ONGLET vers cc.amazon.com/layout
+        # (avec token + designId + redirectOverride qui ramène vers /content).
+        # On gère quand même le cas "nouvel onglet" par sécurité.
+        cc_page = page
+        try:
+            with context.expect_page(timeout=5000) as new_page_info:
+                page.click(launch)
+            cc_page = new_page_info.value  # cas rare : popup/onglet
+            cc_page.wait_for_load_state()
+            log("Créateur de Couverture ouvert dans un nouvel onglet.")
+        except TimeoutError:
+            # Cas nominal : navigation in-place vers cc.amazon.com
+            cc_page.wait_for_url("**cc.amazon.com/**", timeout=TIMEOUT)
+            log("Créateur de Couverture chargé (même onglet, cc.amazon.com).")
 
+        _drive_cover_creator(cc_page, config)
+
+        # Après soumission, le studio redirige vers redirectOverride = /content.
+        page.wait_for_url("**/title-setup/kindle/**/content", timeout=120000)
+        page.wait_for_selector(
+            "#data-assets-cover-file-upload-success", state="visible", timeout=120000
+        )
+        log("Couverture créée et appliquée avec succès.")
+
+    except FileNotFoundError:
+        raise
     except TimeoutError as e:
-        raise Exception(f"Timeout étape 2.2 (Cover Creator) — sélecteur introuvable : {str(e)}")
+        raise Exception(f"Timeout étape 2.2 (couverture) — sélecteur introuvable : {str(e)}")
     except Exception as e:
-        raise Exception(f"Erreur étape 2.2 (Cover Creator) : {str(e)}")
+        raise Exception(f"Erreur étape 2.2 (couverture) : {str(e)}")
+
+
+def _drive_cover_creator(cc_page, config):
+    """
+    Pilote l'assistant du Créateur de Couverture (cc.amazon.com).
+
+    /!\\ ENVIRONNEMENT FRAGILE (constaté en live) : SPA canvas, ids en base64
+    qui changent à chaque session, pas de classes stables. On s'appuie donc
+    UNIQUEMENT sur les libellés texte (get_by_text / get_by_role), et on laisse
+    des page.pause() là où la sélection est purement graphique (templates).
+
+    Assistant en 3 étapes :
+      1. Sélectionner une création   (avec image / sans image, puis template)
+      2. Mettre en forme et modifier (optionnel — on garde les défauts)
+      3. Aperçu                      (puis soumission -> redirect /content)
+
+    RECOMMANDATION : pour un pipeline n8n robuste, préférer config["couverture_path"]
+    (upload d'une image) plutôt que ce studio. Voir use_cover_creator mode 1.
+    """
+    log("Pilotage du Créateur de Couverture...")
+
+    # --- Pop-up d'intro "Comment utiliser le Créateur de Couverture" ---
+    intro = cc_page.get_by_role("link", name="Continuer")
+    try:
+        intro.click(timeout=8000)
+        log("Pop-up d'intro fermée.")
+    except TimeoutError:
+        log("Pas de pop-up d'intro (déjà masquée).")
+
+    # --- Étape 1 : mode avec/sans image (piloté par config, défaut sans image) ---
+    mode = config.get("couverture_mode", "sans_image")
+    libelle_mode = "Création avec image" if mode == "avec_image" else "Création sans image"
+    cc_page.get_by_text(libelle_mode, exact=False).first.click(timeout=TIMEOUT)
+    cc_page.wait_for_timeout(1500)
+
+    # =====================================================================
+    # >>> PAUSE TEMPLATE : sélection purement graphique.
+    # Hooks STABLES repérés en live :
+    #   - Zone de choix         : #ccLayoutChooser
+    #   - Carrousel de templates: #templateCarousel > #ccGridCarousel  (?)
+    #   - Conteneur vignettes   : #gridContainer
+    #   - Séparateur designs    : .imageDesignsLabel (sépare "sans image" / "avec image")
+    # /!\ Les vignettes elles-mêmes ont des CLASSES EN BASE64 (instables) :
+    #   cibler par POSITION, ex. la 1re vraie vignette :
+    #     cc_page.locator("#gridContainer > div").nth(0).click()
+    #   (ajuster l'index pour sauter les séparateurs/labels)
+    # Puis repérer le bouton "Suivant" pour passer à l'étape 2.
+    # =====================================================================
+    log(">>> PAUSE TEMPLATE : choisir une vignette (#gridContainer) puis Suivant")
+    cc_page.pause()
+
+    # --- Étape 2 (mise en forme) : on conserve les défauts, on avance ---
+    # =====================================================================
+    # >>> PAUSE MISE EN FORME : repérer le bouton pour passer à l'Aperçu (étape 3).
+    # =====================================================================
+    log(">>> PAUSE MISE EN FORME : avancer vers l'Aperçu")
+    cc_page.pause()
+
+    # --- Étape 3 (aperçu) + soumission ---
+    # =====================================================================
+    # >>> PAUSE SOUMISSION : repérer le bouton final
+    #   (ex: "Enregistrer et soumettre la couverture") qui déclenche le retour
+    #   vers /content (redirectOverride, action=submit-cover).
+    # =====================================================================
+    log(">>> PAUSE SOUMISSION : cliquer le bouton final de soumission de la couverture")
+    cc_page.pause()
 
 
 # ---------------------------------------------------------------------------
@@ -390,12 +693,16 @@ def main():
             page = context.new_page()
 
             log("Navigation vers KDP Setup...")
-            page.goto("https://kdp.amazon.com/fr_FR/title-setup/kindle/new/details")
+            page.goto(KDP_NEW_EBOOK_URL)
+
+            # Vérifie la session (et point d'entrée du login manuel à coder)
+            ensure_logged_in(page, config)
 
             # Déroulement du workflow
-            fill_book_details(page, config)
-            upload_content(page, config)
-            use_cover_creator(context, page, config)
+            fill_book_details(page, config)       # /details -> clique Continuer
+            upload_content(page, config)          # /content : IA, DRM, manuscrit
+            use_cover_creator(context, page, config)  # /content : couverture
+            page.click("#save-and-continue")      # /content -> /pricing
             set_pricing(page, config)
             asin = submit_and_get_asin(page, config)
 
