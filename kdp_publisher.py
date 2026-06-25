@@ -86,12 +86,8 @@ def ensure_logged_in(page, config):
     page.fill("#ap_password", mdp)
     page.click("#signInSubmit")
 
-    # Garde-fou tant que le login n'est pas implémenté : on échoue proprement
-    # pour que n8n puisse t'alerter (reconnexion manuelle dans kdp-profile).
-    raise Exception(
-        "Session KDP expirée — reconnexion manuelle requise dans le profil "
-        "kdp-profile (ou implémenter ensure_logged_in)."
-    )
+    page.wait_for_url(lambda url: "/ap/signin" not in url, timeout=15000)
+    log("Connexion réussie.")
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +725,9 @@ def main():
 
     output = {}
 
+    page = None
     try:
+
         config = read_config(args.config)
 
         with sync_playwright() as p:
@@ -739,18 +737,16 @@ def main():
                 headless=HEADLESS,
                 args=["--start-maximized"]
             )
-            page.pause()  # Pause initiale pour inspection si nécessaire
 
             page = context.new_page()
 
             log("Navigation vers KDP Setup...")
             page.goto(KDP_NEW_EBOOK_URL)
 
-            page.pause()  # Pause après navigation pour inspection si nécessaire
             # Vérifie la session (et point d'entrée du login manuel à coder)
             ensure_logged_in(page, config)
             page.pause()  # Pause après login pour inspection si nécessaire
-            
+
             # Déroulement du workflow
             fill_book_details(page, config)       # /details -> clique Continuer
             upload_content(page, config)          # /content : IA, DRM, manuscrit
