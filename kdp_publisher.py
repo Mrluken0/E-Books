@@ -79,6 +79,12 @@ def ensure_logged_in(page, config):
     log("Session KDP expirée — page de connexion détectée.")
 
     # >>> Insère ICI ton code de connexion (voir docstring ci-dessus). <<<
+    email = config["email"]
+    mdp = config["mot_de_passe"]
+    page.fill("#ap_email", email)
+    page.click("#continue")
+    page.fill("#ap_password", mdp)
+    page.click("#signInSubmit")
 
     # Garde-fou tant que le login n'est pas implémenté : on échoue proprement
     # pour que n8n puisse t'alerter (reconnexion manuelle dans kdp-profile).
@@ -496,43 +502,63 @@ def _drive_cover_creator(cc_page, config):
     except TimeoutError:
         log("Pas de pop-up d'intro (déjà masquée).")
 
-    # --- Étape 1 : mode avec/sans image (piloté par config, défaut sans image) ---
-    mode = config.get("couverture_mode", "sans_image")
-    libelle_mode = "Création avec image" if mode == "avec_image" else "Création sans image"
-    cc_page.get_by_text(libelle_mode, exact=False).first.click(timeout=TIMEOUT)
+    # --- Étape 1a : source de l'image (dialogue "Obtenir les images") ---
+    # Sélecteurs STABLES vérifiés en live :
+    #   Galerie  : .ccFromImageGalleryButton
+    #   Ignorer  : .ccPlaceholderImageButton
+    #   Upload   : input#fileupload (accept image/*) — pousser le fichier directement
+    source = config.get("couverture_image", "ignorer")
+
+    if source == "ignorer":
+        cc_page.locator(".ccPlaceholderImageButton").first.click(timeout=TIMEOUT)
+
+    elif source == "ordinateur":
+        img_path = config.get("couverture_image_path")
+        if not img_path or not os.path.exists(os.path.abspath(img_path)):
+            raise Exception("couverture_image='ordinateur' mais couverture_image_path introuvable.")
+        cc_page.set_input_files("#fileupload", os.path.abspath(img_path))
+        cc_page.wait_for_timeout(2000)
+
+    elif source == "galerie":
+        cc_page.locator(".ccFromImageGalleryButton").first.click(timeout=TIMEOUT)
+        cc_page.wait_for_timeout(1500)
+        # Rubrique de la galerie (texte stable), ex. "Santé et Beauté"
+        rubrique = config.get("couverture_galerie_rubrique")
+        if rubrique:
+            cc_page.get_by_text(rubrique, exact=True).first.click(timeout=TIMEOUT)
+            cc_page.wait_for_timeout(2500)
+        # Image de la galerie : sélection positionnelle (img.userImage)
+        index = int(config.get("couverture_galerie_index", 0))
+        cc_page.locator("img.userImage").nth(index).click(timeout=TIMEOUT)
+        cc_page.wait_for_timeout(1500)
+    else:
+        raise Exception(f"couverture_image inconnu : {source!r} (galerie|ordinateur|ignorer)")
+
+    # =====================================================================
+    # >>> /!\ BLOCAGE CONNU — APPLICATION DE L'IMAGE (à résoudre en live)
+    # Vérifié en live : un simple .click() sur une vignette `img.userImage` NE
+    # L'APPLIQUE PAS à la couverture. KDP refuse ensuite la soumission :
+    #   « Nous ne sommes pas en mesure de soumettre votre couverture avec
+    #     l'image par défaut. »
+    # => Une VRAIE image est OBLIGATOIRE : l'option "Ignorer cette étape"
+    #    (image par défaut) ne produit donc PAS une couverture soumissible.
+    # => L'application d'une image galerie nécessite probablement un
+    #    glisser-déposer sur le canvas ou un double-clic (éditeur graphique).
+    #    Interaction non résolue de façon fiable.
+    #
+    # RECOMMANDATION FORTE : pour un pipeline robuste, utiliser plutôt
+    #   config["couverture_path"] (upload d'une image prête) — voir
+    #   use_cover_creator mode 1, entièrement fiable.
+    # =====================================================================
+    log(">>> PAUSE APPLICATION IMAGE : appliquer réellement l'image (drag/double-clic ?)")
+    cc_page.pause()
+
+    # --- Étape 3 : Aperçu puis soumission (sélecteurs STABLES confirmés) ---
+    # Bouton "Aperçu" (footer, distingué par texte) :
+    cc_page.get_by_text("Aperçu", exact=True).last.click(timeout=TIMEOUT)
     cc_page.wait_for_timeout(1500)
-
-    # =====================================================================
-    # >>> PAUSE TEMPLATE : sélection purement graphique.
-    # Hooks STABLES repérés en live :
-    #   - Zone de choix         : #ccLayoutChooser
-    #   - Carrousel de templates: #templateCarousel > #ccGridCarousel  (?)
-    #   - Conteneur vignettes   : #gridContainer
-    #   - Séparateur designs    : .imageDesignsLabel (sépare "sans image" / "avec image")
-    # /!\ Les vignettes elles-mêmes ont des CLASSES EN BASE64 (instables) :
-    #   cibler par POSITION, ex. la 1re vraie vignette :
-    #     cc_page.locator("#gridContainer > div").nth(0).click()
-    #   (ajuster l'index pour sauter les séparateurs/labels)
-    # Puis repérer le bouton "Suivant" pour passer à l'étape 2.
-    # =====================================================================
-    log(">>> PAUSE TEMPLATE : choisir une vignette (#gridContainer) puis Suivant")
-    cc_page.pause()
-
-    # --- Étape 2 (mise en forme) : on conserve les défauts, on avance ---
-    # =====================================================================
-    # >>> PAUSE MISE EN FORME : repérer le bouton pour passer à l'Aperçu (étape 3).
-    # =====================================================================
-    log(">>> PAUSE MISE EN FORME : avancer vers l'Aperçu")
-    cc_page.pause()
-
-    # --- Étape 3 (aperçu) + soumission ---
-    # =====================================================================
-    # >>> PAUSE SOUMISSION : repérer le bouton final
-    #   (ex: "Enregistrer et soumettre la couverture") qui déclenche le retour
-    #   vers /content (redirectOverride, action=submit-cover).
-    # =====================================================================
-    log(">>> PAUSE SOUMISSION : cliquer le bouton final de soumission de la couverture")
-    cc_page.pause()
+    # Bouton final "Enregistrer et envoyer" -> redirige vers /content :
+    cc_page.locator("#ccSubmitCoverButton").click(timeout=TIMEOUT)
 
 
 # ---------------------------------------------------------------------------
@@ -540,35 +566,44 @@ def _drive_cover_creator(cc_page, config):
 # ---------------------------------------------------------------------------
 def set_pricing(page, config):
     """
-    Définit le prix sur amazon.fr en EUR.
-    KDP calcule automatiquement les autres marketplaces : on n'y touche PAS.
+    Étape 3 (page /pricing) : KDP Select, marketplace principal = FR,
+    taux de redevance, prix EUR. Les autres marketplaces sont auto-calculés.
+
+    Sélecteurs vérifiés en live (KDP fr_FR, ebook) :
+      KDP Select (checkbox)   : #data-is-select  (name data[is_select]-check)
+      Marketplace principal   : select[name="data[digital][home_marketplace]"] (val "FR")
+      Taux de redevance       : input[name="data[digital][royalty_rate]-radio"][value="70_PERCENT|35_PERCENT"]
+      Prix FR (TTC, éditable) : input[name="data[digital][channels][amazon][FR][price_vat_inclusive]"]
+        /!\\ Le champ devient éditable UNIQUEMENT après avoir mis le marketplace
+            principal sur FR (sinon FR est en lecture seule = price_readonly).
     """
     log("Étape 3 : Configuration des prix...")
     try:
         prix = str(config["prix"])
-        log(f"Prix cible (EUR / amazon.fr) : {prix}")
+        log(f"Prix cible (EUR TTC / amazon.fr) : {prix}")
 
-        # =====================================================================
-        # >>> PAUSE 3 : PRIX
-        # À inspecter :
-        #   - Distribution / territoires (mondiale)
-        #   - Le champ prix de base correspondant à amazon.fr (EUR).
-        #     KDP affiche un tableau de marketplaces : ne remplir QUE la ligne
-        #     amazon.fr, laisser les autres se calculer automatiquement.
-        #   - Bouton de publication
-        # Variable dispo : prix
-        # =====================================================================
-        log(">>> PAUSE 3 : identifier le champ prix amazon.fr (EUR) — NE PAS toucher aux autres")
-        page.pause()
+        page.wait_for_selector('select[name="data[digital][home_marketplace]"]', timeout=TIMEOUT)
 
-        # -------------------------------------------------------------------
-        # TEMPLATE :
-        # page.check("SELECTOR_TERRITORIES_WORLDWIDE")
-        # # Cibler spécifiquement la ligne / l'onglet amazon.fr :
-        # page.fill("SELECTOR_PRICE_AMAZON_FR_EUR", prix)
-        # # Laisser KDP recalculer les autres marketplaces :
-        # page.wait_for_timeout(2000)
-        # -------------------------------------------------------------------
+        # --- KDP Select (exclusivité) : piloté par config, défaut = non inscrit ---
+        select_check = page.locator("#data-is-select")
+        if config.get("kdp_select", False):
+            if not select_check.is_checked():
+                select_check.check()
+        else:
+            if select_check.is_checked():
+                select_check.uncheck()
+
+        # --- Marketplace principal = FR (rend le prix FR éditable) ---
+        page.select_option('select[name="data[digital][home_marketplace]"]', value="FR")
+        page.wait_for_timeout(2000)
+
+        # --- Taux de redevance (défaut 70 %) ---
+        royalty = "35_PERCENT" if str(config.get("royalty", "70")) == "35" else "70_PERCENT"
+        page.check(f'input[name="data[digital][royalty_rate]-radio"][value="{royalty}"]')
+
+        # --- Prix FR (EUR TTC) ; KDP recalcule les autres marketplaces ---
+        page.fill('input[name="data[digital][channels][amazon][FR][price_vat_inclusive]"]', prix)
+        page.wait_for_timeout(2000)
 
     except TimeoutError as e:
         raise Exception(f"Timeout étape 3 (prix) — sélecteur introuvable : {str(e)}")
@@ -590,20 +625,22 @@ def submit_and_get_asin(page, config):
     """
     log("Soumission du livre pour publication...")
     try:
-        # =====================================================================
-        # >>> PAUSE FINALE : identifier le bouton PUBLIER
-        # Après clic, KDP redirige généralement vers la Bibliothèque (Bookshelf)
-        # — il n'y a PAS forcément de modal avec l'ASIN.
-        # =====================================================================
-        log(">>> PAUSE FINALE : identifier le bouton 'Publier' (puis redirection Bookshelf)")
-        page.pause()
+        # --- Garde-fou pré-publication ---
+        # Si le bouton Publier est désactivé (compte KDP incomplet : infos
+        # fiscales/bancaires manquantes, ou pré-requis livre non satisfaits),
+        # on s'arrête proprement au lieu de cliquer dans le vide.
+        page.wait_for_selector("#save-and-publish-announce", timeout=TIMEOUT)
+        if _publish_is_blocked(page):
+            raise Exception(
+                "Publication impossible — bouton Publier désactivé "
+                "(compte KDP incomplet : infos fiscales/bancaires, ou pré-requis "
+                "du livre non satisfaits comme la couverture)."
+            )
 
-        # -------------------------------------------------------------------
-        # TEMPLATE :
-        # page.click("SELECTOR_PUBLISH_BUTTON")
-        # # Attendre la redirection vers la bibliothèque
-        # page.wait_for_load_state("networkidle", timeout=60000)
-        # -------------------------------------------------------------------
+        # Bouton "Publier votre ebook Kindle" (vérifié en live)
+        page.click("#save-and-publish-announce")
+        # Après clic, KDP redirige vers la Bibliothèque (Bookshelf).
+        page.wait_for_load_state("networkidle", timeout=60000)
 
         # --- 1) Extraction via l'URL courante ---
         asin = _extract_asin_from_url(page.url)
@@ -627,6 +664,26 @@ def submit_and_get_asin(page, config):
         raise Exception(f"Erreur étape finale (publication / récupération ASIN) : {str(e)}")
 
 
+def _publish_is_blocked(page):
+    """
+    True si le bouton 'Publier' est désactivé (compte/livre incomplet).
+
+    Robuste aux variantes Amazon : classe contenant 'disabled' (span ou bouton),
+    attribut aria-disabled='true', ou propriété .disabled du <button>.
+    """
+    return bool(page.evaluate(
+        """() => {
+            const span = document.querySelector('#save-and-publish');
+            const btn  = document.querySelector('#save-and-publish-announce');
+            const cls  = ((span && span.className) || '') + ' ' + ((btn && btn.className) || '');
+            const ariaSpan = span && span.getAttribute('aria-disabled');
+            const ariaBtn  = btn && btn.getAttribute('aria-disabled');
+            const prop = !!(btn && btn.disabled === true);
+            return /disabled/i.test(cls) || ariaSpan === 'true' || ariaBtn === 'true' || prop;
+        }"""
+    ))
+
+
 def _extract_asin_from_url(url):
     """Cherche un ASIN (10 caractères A-Z0-9) dans l'URL courante."""
     match = re.search(r"asin=([A-Z0-9]{10})", url)
@@ -642,25 +699,18 @@ def _scrape_asin_from_bookshelf(page, titre_livre):
     Fallback : sur la page Bookshelf, retrouve la ligne du livre par son titre
     et en extrait l'ASIN.
 
-    À FINALISER après inspection du DOM de la bibliothèque :
-      - sélecteur des lignes de livres
-      - emplacement du titre et de l'ASIN dans chaque ligne
+    /!\\ DOM Bookshelf non encore cartographié : implémentation best-effort,
+    à affiner si besoin (sélecteur exact des lignes / emplacement de l'ASIN).
     """
-    log(">>> PAUSE (fallback ASIN) : inspecter le tableau Bookshelf pour localiser titre + ASIN")
-    page.pause()
-
-    # -------------------------------------------------------------------
-    # TEMPLATE :
-    # try:
-    #     row = page.locator("SELECTOR_BOOK_ROW", has_text=titre_livre).first
-    #     row.wait_for(timeout=TIMEOUT)
-    #     # L'ASIN est souvent dans un attribut data-* ou un texte de la ligne :
-    #     row_text = row.inner_text()
-    #     return _extract_asin_from_url(row_text) or _extract_asin_from_text(row_text)
-    # except Exception:
-    #     return None
-    # -------------------------------------------------------------------
-    return None
+    try:
+        row = page.locator("[data-asin]", has_text=titre_livre).first
+        row.wait_for(timeout=10000)
+        asin = row.get_attribute("data-asin")
+        if asin and re.fullmatch(r"[A-Z0-9]{10}", asin):
+            return asin
+        return _extract_asin_from_text(row.inner_text())
+    except Exception:
+        return None
 
 
 def _extract_asin_from_text(text):
@@ -689,15 +739,18 @@ def main():
                 headless=HEADLESS,
                 args=["--start-maximized"]
             )
+            page.pause()  # Pause initiale pour inspection si nécessaire
 
             page = context.new_page()
 
             log("Navigation vers KDP Setup...")
             page.goto(KDP_NEW_EBOOK_URL)
 
+            page.pause()  # Pause après navigation pour inspection si nécessaire
             # Vérifie la session (et point d'entrée du login manuel à coder)
             ensure_logged_in(page, config)
-
+            page.pause()  # Pause après login pour inspection si nécessaire
+            
             # Déroulement du workflow
             fill_book_details(page, config)       # /details -> clique Continuer
             upload_content(page, config)          # /content : IA, DRM, manuscrit
