@@ -30,6 +30,25 @@ LANG_MAP = {
     "ja": "japanese",
 }
 
+# Codes marketplace KDP = valeur des <option> du select
+# name="data[digital][home_marketplace]", indexés par libellé affiché
+# (= SITE_VENTE_PRINCIPAL_KDP). Vérifié en live sur la page /details (2026-07).
+MARKETPLACE_MAP = {
+    "Amazon.com": "US",
+    "Amazon.in": "IN",
+    "Amazon.co.uk": "UK",
+    "Amazon.de": "DE",
+    "Amazon.fr": "FR",
+    "Amazon.es": "ES",
+    "Amazon.it": "IT",
+    "Amazon.nl": "NL",
+    "Amazon.co.jp": "JP",
+    "Amazon.com.br": "BR",
+    "Amazon.ca": "CA",
+    "Amazon.com.mx": "MX",
+    "Amazon.com.au": "AU",
+}
+
 # Constantes étape 1 — communes à tous les livres de ce pipeline
 LANGUE_KDP = "Français"
 DROIT_PUBLICATION_KDP = "Je détiens les droits d'auteur et possède les droits de publication requis."
@@ -158,42 +177,28 @@ def fill_book_details(page, config):
         page.check("#non-public-domain")
 
         
-        # --- Contenu pour public adulte : non ---
+        # --- Contenu pour public adulte (connotation sexuelle) : oui / non ---
+        # Piloté par le bool config["contenu_adulte"]. Rien d'autre à renseigner :
+        # la tranche d'âge de lecture (data[reading_interest_age]) sert à distinguer
+        # les livres pour ENFANTS, pas le contenu adulte -> volontairement ignorée.
         page.check('input[name="data[is_adult_content]-radio"][value="false"]')
         if config.get("contenu_adulte"):
             page.check('input[name="data[is_adult_content]-radio"][value="true"]')
 
-            # --- Âge de lecture minimum (obligatoire uniquement si contenu adulte) ---
-            # Le(s) dropdown(s) âge min/max n'apparaissent qu'APRÈS avoir coché "true".
-            # On ne renseigne JAMAIS l'âge maximum (choix assumé) ; seul le minimum
-            # est piloté par config["age_lecture_min"] (nombre, ex: 18).
-            # /!\ Ne se déclenche pas sur les livres actuels (contenu_adulte faux).
-            #     Sélecteur NON confirmé -> inspection requise le jour d'un livre adulte.
-            log(">>> PAUSE ÂGE LECTURE : inspecter le dropdown 'âge minimum' "
-                f"(valeur cible = config['age_lecture_min'] = {config.get('age_lecture_min')}). "
-                "M'envoyer le/les sélecteur(s) exact(s).")
-            page.pause()
-            # TODO(après inspection) : sélectionner config["age_lecture_min"] dans le
-            #                          dropdown âge minimum ; laisser l'âge maximum vide.
 
+        # --- Site de vente principal (Amazon.fr) ---
+        # Vérifié en live : c'est le MÊME champ que l'étape 3
+        # (select[name="data[digital][home_marketplace]"]), présent AUSSI sur la
+        # page /details mais avec un défaut = US (Amazon.com). On le règle sur FR
+        # ici par sécurité (en plus de l'étape 3), via le sélecteur éprouvé.
+        page.select_option(
+            'select[name="data[digital][home_marketplace]"]',
+            value=MARKETPLACE_MAP.get(SITE_VENTE_PRINCIPAL_KDP, "FR"),
+        )
+        page.wait_for_timeout(1500)
 
-        # --- Site de vente principal ---
-        page.click("#data-digital-home-marketplace-home")
-
-        # >>> PAUSE INSPECTION ÉTAPE 1 (2 contrôles restants à cartographier) <<<
-        # Ce point est atteint AVANT select_categories : la page /details est
-        # entièrement chargée, on inspecte ici les DEUX contrôles restants.
-        #  (a) SITE DE VENTE : le contrôle ouvert/affiché par le clic ci-dessus
-        #      est-il le MÊME que le select FR de l'étape 3
-        #      (select[name="data[digital][home_marketplace]"]) ou distinct ?
-        #  (b) OPTION DE PUBLICATION : les 2 radios "Paraître maintenant" /
-        #      "Précommande" (défiler la page si besoin).
-        log(">>> PAUSE INSPECTION : m'envoyer (a) le sélecteur du contrôle 'site de "
-            "vente' + s'il est identique au select FR de l'étape 3, et (b) le "
-            "sélecteur des 2 radios 'Paraître maintenant' / 'Précommande'.")
-        page.pause()
-        # TODO(après clarif site de vente) : soit rien (FR posé en étape 3 suffit),
-        #                                    soit régler ici sur SITE_VENTE_PRINCIPAL_KDP.
+        # --- Option de publication (Paraître maintenant / Précommande) ---
+        _set_publish_option(page, config.get("option_publication", OPTION_PUBLICATION_KDP))
 
         # --- Rubriques + classement (modal) ---
         select_categories(page, config)
@@ -202,17 +207,6 @@ def fill_book_details(page, config):
         # --- Mots-clés (7 champs) ---
         for i, mot in enumerate(mots_cles):
             page.fill(f"#data-keywords-{i}", mot)
-
-
-        # --- Option de publication (obligatoire) ---
-        # config["option_publication"] : "Paraître maintenant" | "Précommande"
-        # (défaut = OPTION_PUBLICATION_KDP). Les DEUX cas doivent être gérés.
-        # /!\ Sélecteur des 2 radios à confirmer via la PAUSE INSPECTION plus haut
-        #     (pas de page.pause() ici : ce point n'est atteint qu'une fois les
-        #      catégories réparées, l'inspection se fait donc à la pause du dessus).
-        option_pub = config.get("option_publication", OPTION_PUBLICATION_KDP)
-        log(f"Option de publication cible : {option_pub!r} (sélecteur à coder).")
-        # TODO(après inspection) : cocher le radio correspondant à option_pub.
 
         # --- Enregistrer et continuer vers l'étape Contenu ---
         page.click("#save-and-continue")
@@ -223,6 +217,47 @@ def fill_book_details(page, config):
         raise Exception(f"Erreur étape 1 (détails livre) — clé de config manquante : {str(e)}")
     except Exception as e:
         raise Exception(f"Erreur étape 1 (détails livre) : {str(e)}")
+
+
+def _set_publish_option(page, option_pub):
+    """
+    Sélectionne l'option de publication sur la page /details.
+
+    /!\\ Vérifié en live : ce N'EST PAS un radio <input> mais un ACCORDÉON Amazon
+    (#data-preorder-enabled-accordion) à 2 lignes ; l'état réel est stocké dans
+    l'input caché name="data[preorder][enabled]" :
+      - "Paraître maintenant" -> ligne data-a-accordion-row-name="off" (enabled=false,
+        « Je souhaite que mon livre paraisse maintenant » — active par défaut)
+      - "Précommande"         -> ligne data-a-accordion-row-name="on"  (enabled=true,
+        « Proposer mon ebook Kindle en précommande »)
+    On clique le lien .a-accordion-row de la ligne voulue (sélecteurs stables).
+
+    /!\\ PRÉCOMMANDE : exige EN PLUS une date de parution
+    (#data-preorder-release-date-input, datepicker) et un compte éligible.
+    Jamais utilisé dans ce pipeline -> volet date NON automatisé (page.pause()
+    pour finalisation live le jour où un vrai livre partira en précommande).
+    """
+    lignes = {"Paraître maintenant": "off", "Précommande": "on"}
+    row = lignes.get(option_pub)
+    if row is None:
+        raise Exception(
+            f"option_publication invalide : {option_pub!r} "
+            "(attendu 'Paraître maintenant' ou 'Précommande')."
+        )
+
+    log(f"Option de publication : {option_pub!r} (accordéon ligne '{row}').")
+    page.click(
+        f'#data-preorder-enabled-accordion '
+        f'[data-a-accordion-row-name="{row}"] .a-accordion-row'
+    )
+
+    if row == "on":
+        # Cas précommande : date de parution + éligibilité à finaliser en live.
+        log(">>> PAUSE PRÉCOMMANDE : renseigner la date de parution "
+            "(#data-preorder-release-date-input) et vérifier l'éligibilité du "
+            "compte. Volet non encore automatisé — m'envoyer les infos si besoin.")
+        page.pause()
+        # TODO(précommande) : remplir la date de parution puis valider.
 
 
 def _fill_description(page, description):
@@ -266,122 +301,151 @@ def _fill_description(page, description):
 
 def _normalize_categories(categories):
     """
-    Normalise config["categories"] en liste de chemins (listes de segments).
+    Normalise config["categories"] en liste de rubriques {rubrique, classement, libelle}.
 
-    Accepte :
-      - une chaîne unique : "Santé et Bien-être > Psychologie ... > Psychologie appliquée"
-      - une liste de chaînes : [".. > ..", ".. > .."]
-    Pour chaque chemin, le DERNIER segment = le classement (case feuille),
-    les précédents = la cascade de menus déroulants (rubrique, rubrique secondaire...).
+    Format attendu (référentiel KDP par nodeId, vérifié en live 2026-07) :
+      "categories": [
+        {"rubrique": "156563011", "classement": "202437600011",
+         "libelle": "Développement personnel > Success"},
+        ...   (3 rubriques maximum)
+      ]
+      - rubrique   = nodeId de la rubrique de NIVEAU 0 (dans la value JSON de l'option
+                     du 1er <select> : {"level":0,"key":"<nom FR>","nodeId":"<id>"})
+      - classement = nodeId de la FEUILLE (case class="checkbox-<nodeId>", libellé anglais)
+      - libelle    = facultatif, purement informatif (logs)
+
+    Les nodeId sont indépendants de la langue et de l'orthographe -> robustes.
+    (Ne PAS mettre de préfixe "Kindle Store"/"Kindle eBooks" : contexte déjà fixe.)
     """
-    if isinstance(categories, str):
+    if isinstance(categories, dict):
         categories = [categories]
-    paths = []
+    rubriques = []
     for cat in categories:
-        segments = [s.strip() for s in cat.split(">") if s.strip()]
-        if segments:
-            paths.append(segments)
-    return paths
+        if not isinstance(cat, dict) or "rubrique" not in cat or "classement" not in cat:
+            raise Exception(
+                "Format categories invalide : chaque entrée doit être un objet "
+                "{'rubrique': <nodeId>, 'classement': <nodeId>}. Reçu : " + repr(cat)
+            )
+        rubriques.append({
+            "rubrique": str(cat["rubrique"]),
+            "classement": str(cat["classement"]),
+            "libelle": cat.get("libelle"),
+        })
+    return rubriques[:3]  # KDP : 3 classements maximum
 
 
 def select_categories(page, config):
     """
-    Sélectionne les rubriques + le classement via la modal KDP.
+    Sélectionne jusqu'à 3 rubriques + classements via la modal KDP, par nodeId.
 
-    Mécanique vérifiée en live (KDP fr_FR, ebook) :
-      - Bouton d'ouverture : #categories-modal-button
-      - Modal              : .a-popover-modal
-      - Cascade            : <select> natifs React ; le TEXTE de l'option = le nom
-                             de la rubrique -> on sélectionne par label (robuste,
-                             indépendant du JSON {level,key,nodeId} en value).
-      - Classement final   : case à cocher (feuille) -> alimente
-                             data[selected_browse_nodes][N][id].
-
-    /!\\ À CONFIRMER en live (laissé volontairement souple) :
-      - libellé exact du bouton de validation de la modal
-      - libellé du lien "Ajouter une rubrique" pour les rubriques 2 et 3
+    Mécanique VÉRIFIÉE EN LIVE (KDP fr_FR, ebook, 2026-07) :
+      - Ouverture        : #categories-modal-button
+      - Contexte fixe    : "Livres Kindle" (aucun préfixe Kindle Store/eBooks à saisir)
+      - Cascade niveau 0 : <select> natif ; chaque <option> porte une value JSON
+                           {"level":0,"key":"<nom FR>","nodeId":"<id>"} -> on choisit
+                           l'option dont la value contient "nodeId":"<rubrique>".
+      - Classement       : <input type=checkbox class="checkbox-<nodeId>"> (sans id/name,
+                           libellé EN ANGLAIS) -> coché par la classe nodeId (fiable).
+      - Ligne supplém.   : bouton "Ajouter une autre rubrique"
+      - Validation       : bouton "Enregistrer les catégories"
     """
-    cats = config.get("categories")
+    cats = _normalize_categories(config.get("categories"))
     if not cats:
         log("Aucune rubrique fournie — étape catégories ignorée.")
         return
 
-    paths = _normalize_categories(cats)
-    log(f"Rubriques à sélectionner : {paths}")
+    log(f"Rubriques (nodeId) à sélectionner : {cats}")
 
     page.click("#categories-modal-button")
-    modal = page.locator("#a-popover-4").last
-    modal.wait_for(state="visible", timeout=TIMEOUT)
+    page.wait_for_timeout(1500)
 
-    for idx, segments in enumerate(paths):
+    for idx, cat in enumerate(cats):
         if idx > 0:
-            # Rubriques 2 et 3 : révéler une nouvelle ligne de cascade.
-            # KDP affiche un lien type "Ajouter une rubrique".
-            _add_category_row(modal)
+            _add_category_row(page)
+        _select_rubrique_by_node_id(page, cat["rubrique"])
+        _check_classement_by_node_id(page, cat["classement"], cat.get("libelle"))
 
-        *cascade, classement = segments
-
-        # 1) Cascade : sélectionner chaque rubrique dans le prochain <select> dispo.
-        for niveau, nom in enumerate(cascade):
-            _select_cascade_level(modal, niveau_global=_cascade_index(modal), label=nom)
-
-        # 2) Classement : cocher la feuille correspondante.
-        _check_classement(modal, classement)
-
-    # Valider la modal. Le bouton de confirmation KDP est un bouton de footer ;
-    # on le cible par son rôle/texte pour rester robuste aux ids dynamiques.
-    _confirm_categories_modal(modal)
+    _confirm_categories_modal(page)
 
 
-def _cascade_index(modal):
-    """Nombre de <select> de cascade déjà présents/visibles (pour viser le suivant)."""
-    return modal.locator("select:visible").count()
-
-
-def _select_cascade_level(modal, niveau_global, label):
+def _select_rubrique_by_node_id(page, node_id):
     """
-    Sélectionne `label` dans le prochain menu déroulant de cascade, puis attend
-    que le niveau suivant (ou les cases de classement) se charge via XHR.
+    Sélectionne la rubrique de niveau 0 portant `node_id`, dans le dernier bloc de
+    rubrique encore vide, puis laisse charger les cases de classement (XHR KDP).
     """
-    # Le dernier <select> visible est celui à remplir pour le niveau courant.
-    sel = modal.locator("select:visible").last
-    sel.select_option(label=label)
-    # Laisse l'appel get-child-nodes peupler le niveau suivant.
-    modal.page.wait_for_timeout(1200)
+    found = page.evaluate(
+        """(nodeId) => {
+            const isL0 = s => s.options[0] &&
+                s.options[0].value.replace(/\\s/g, '') === '{"level":0}';
+            const l0 = [...document.querySelectorAll('select')].filter(isL0);
+            if (!l0.length) return { ok: false, reason: 'aucun select niveau 0' };
+            // dernier select niveau 0 encore sur le placeholder = bloc vide à remplir
+            const target = [...l0].reverse().find(s => s.selectedIndex === 0)
+                        || l0[l0.length - 1];
+            const opt = [...target.options].find(
+                o => (o.value || '').includes('"nodeId":"' + nodeId + '"'));
+            if (!opt) return { ok: false, reason: 'option nodeId introuvable' };
+            target.value = opt.value;
+            target.dispatchEvent(new Event('change', { bubbles: true }));
+            return { ok: true, label: opt.text.trim() };
+        }""",
+        node_id,
+    )
+    if not found or not found.get("ok"):
+        raison = found.get("reason") if found else "aucun retour"
+        raise Exception(f"Rubrique nodeId={node_id} non sélectionnée ({raison}).")
+    log(f"Rubrique sélectionnée : {found['label']} (nodeId={node_id}).")
+    page.wait_for_timeout(2000)  # laisse le XHR peupler les cases de classement
 
 
-def _check_classement(modal, classement):
-    """Coche la case de classement (feuille) dont le label correspond."""
-    # Case à cocher repérée par le texte de son label, dans la modal.
-    case = modal.get_by_label(classement, exact=False)
-    case.wait_for(state="visible", timeout=TIMEOUT)
-    case.check()
+def _check_classement_by_node_id(page, node_id, libelle=None):
+    """Coche la feuille de classement identifiée par sa classe checkbox-<nodeId>."""
+    res = page.evaluate(
+        """(nodeId) => {
+            const cb = document.querySelector('input.checkbox-' + nodeId);
+            if (!cb) return { ok: false };
+            if (!cb.checked) cb.click();
+            return { ok: true, checked: cb.checked,
+                     label: (cb.closest('label')?.innerText || '').trim() };
+        }""",
+        node_id,
+    )
+    if not res or not res.get("ok"):
+        raise Exception(
+            f"Classement nodeId={node_id} introuvable dans la modal "
+            "(la rubrique parente sélectionnée est-elle la bonne ?)."
+        )
+    log(f"Classement coché : {res.get('label') or libelle or '?'} (nodeId={node_id}).")
+    page.wait_for_timeout(600)
 
 
-def _add_category_row(modal):
-    """
-    Révèle une ligne de rubrique supplémentaire (rubriques 2 et 3).
-    À confirmer en live : libellé exact du lien (ex: "Ajouter une rubrique").
-    """
-    lien = modal.get_by_text("Ajouter une rubrique", exact=False)
-    if lien.count() > 0:
-        lien.first.click()
-        modal.page.wait_for_timeout(800)
+def _add_category_row(page):
+    """Ajoute une ligne de rubrique supplémentaire (bouton 'Ajouter une autre rubrique')."""
+    page.evaluate(
+        """() => {
+            const b = [...document.querySelectorAll('button')].find(
+                x => x.textContent.trim() === 'Ajouter une autre rubrique'
+                     && x.offsetParent !== null);
+            if (b) b.click();
+        }"""
+    )
+    page.wait_for_timeout(1200)
 
 
-def _confirm_categories_modal(modal):
-    """
-    Valide la modal des rubriques.
-    À confirmer en live : libellé exact ("Enregistrer", "Confirmer", "Valider"...).
-    On essaie plusieurs libellés courants pour rester robuste.
-    """
-    for libelle in ("Enregistrer", "Confirmer", "Valider", "Terminé"):
-        bouton = modal.get_by_role("button", name=libelle)
-        if bouton.count() > 0:
-            bouton.first.click()
-            return
-    # Fallback : bouton primaire du footer de la modal.
-    modal.locator(".a-button-primary").last.click()
+def _confirm_categories_modal(page):
+    """Valide la modal via le bouton 'Enregistrer les catégories' (vérifié en live)."""
+    clicked = page.evaluate(
+        """() => {
+            const b = [...document.querySelectorAll('button')].find(
+                x => x.textContent.trim() === 'Enregistrer les catégories'
+                     && x.offsetParent !== null);
+            if (b) { b.click(); return true; }
+            return false;
+        }"""
+    )
+    if not clicked:
+        raise Exception("Bouton 'Enregistrer les catégories' introuvable dans la modal.")
+    page.wait_for_timeout(1500)
 
 
 # ---------------------------------------------------------------------------
