@@ -122,34 +122,69 @@ def fill_book_details(page, config):
         # =====================================================================
 
         # --- Langue ---
-        page.wait_for_selector("#data-language-native", timeout=TIMEOUT)
         langue_kdp = LANG_MAP.get(config.get("langue", "fr").lower(), "french")
-        page.select_option("#data-language-native", value=langue_kdp)
+
+        # Force la valeur directement via JS sur le select natif
+        page.evaluate(f"""
+            var sel = document.querySelector('#data-language-native');
+            sel.value = '{langue_kdp}';
+            sel.dispatchEvent(new Event('change', {{bubbles: true}}));
+        """)
+
 
         # --- Titre / sous-titre ---
         page.fill("#data-title", config["titre_livre"])
         if config.get("sous_titre"):
             page.fill("#data-subtitle", config["sous_titre"])
 
+        # --- Série ---
+        if config.get("serie"):
+            page.click("#a-autoid-2-announce", config["serie"])
+            Détail_Série = config.get("serie").split(",")
+            if Détail_Série[0] == "nouvelle série":
+                page.click("#modal-button-create-or-select-create")
+                if Détail_Série[0] == "contenu principal":
+                    page.click("#modal-button-main")
+                    #A finir de coder
+                else :
+                    page.click("#modal-button-related")
+                    #A finir de coder
+
+            else :
+                page.click("#modal-button-create-or-select-existing")
+                #A finir de coder
+
         # --- Auteur principal ---
         page.fill("#data-primary-author-first-name", prenom)
         page.fill("#data-primary-author-last-name", nom)
 
+        
         # --- Description (CKEditor, voir helper dédié) ---
         _fill_description(page, config["description"])
 
+        
         # --- Droits de publication : je détiens les droits ---
         page.check("#non-public-domain")
+
+        
+        # --- Contenu pour public adulte : non ---
+        page.check('input[name="data[is_adult_content]-radio"][value="false"]')
+        if config.get("contenu_adulte"):
+            page.check('input[name="data[is_adult_content]-radio"][value="true"]')
+
+        
+        # --- Site de vente principal ---
+        page.click("#data-digital-home-marketplace-home")
+        #A finir de coder 
+
+        # --- Rubriques + classement (modal) ---
+        select_categories(page, config)
+
 
         # --- Mots-clés (7 champs) ---
         for i, mot in enumerate(mots_cles):
             page.fill(f"#data-keywords-{i}", mot)
-
-        # --- Contenu pour public adulte : Non ---
-        page.check('input[name="data[is_adult_content]-radio"][value="false"]')
-
-        # --- Rubriques + classement (modal) ---
-        select_categories(page, config)
+     
 
         # --- Enregistrer et continuer vers l'étape Contenu ---
         page.click("#save-and-continue")
@@ -247,7 +282,7 @@ def select_categories(page, config):
     log(f"Rubriques à sélectionner : {paths}")
 
     page.click("#categories-modal-button")
-    modal = page.locator(".a-popover-modal").last
+    modal = page.locator("#a-popover-4").last
     modal.wait_for(state="visible", timeout=TIMEOUT)
 
     for idx, segments in enumerate(paths):
@@ -738,7 +773,11 @@ def main():
                 args=["--start-maximized"]
             )
 
-            page = context.new_page()
+            # Utilise l'onglet existant au lieu d'en créer un nouveau
+            if context.pages:
+                page = context.pages[0]
+            else:
+                page = context.new_page()
 
             log("Navigation vers KDP Setup...")
             page.goto(KDP_NEW_EBOOK_URL)
