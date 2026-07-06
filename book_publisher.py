@@ -143,21 +143,7 @@ def fill_book_details(page, config):
             page.fill("#data-subtitle", config["sous_titre"])
 
         # --- Série ---
-        if config.get("serie"):
-            page.click("#a-autoid-2-announce", config["serie"])
-            Détail_Série = config.get("serie").split(",")
-            if Détail_Série[0] == "nouvelle série":
-                page.click("#modal-button-create-or-select-create")
-                if Détail_Série[0] == "contenu principal":
-                    page.click("#modal-button-main")
-                    #A finir de coder
-                else :
-                    page.click("#modal-button-related")
-                    #A finir de coder
-
-            else :
-                page.click("#modal-button-create-or-select-existing")
-                #A finir de coder
+        # A coder
 
         # --- Auteur principal ---
         page.fill("#data-primary-author-first-name", prenom)
@@ -177,10 +163,37 @@ def fill_book_details(page, config):
         if config.get("contenu_adulte"):
             page.check('input[name="data[is_adult_content]-radio"][value="true"]')
 
-        
+            # --- Âge de lecture minimum (obligatoire uniquement si contenu adulte) ---
+            # Le(s) dropdown(s) âge min/max n'apparaissent qu'APRÈS avoir coché "true".
+            # On ne renseigne JAMAIS l'âge maximum (choix assumé) ; seul le minimum
+            # est piloté par config["age_lecture_min"] (nombre, ex: 18).
+            # /!\ Ne se déclenche pas sur les livres actuels (contenu_adulte faux).
+            #     Sélecteur NON confirmé -> inspection requise le jour d'un livre adulte.
+            log(">>> PAUSE ÂGE LECTURE : inspecter le dropdown 'âge minimum' "
+                f"(valeur cible = config['age_lecture_min'] = {config.get('age_lecture_min')}). "
+                "M'envoyer le/les sélecteur(s) exact(s).")
+            page.pause()
+            # TODO(après inspection) : sélectionner config["age_lecture_min"] dans le
+            #                          dropdown âge minimum ; laisser l'âge maximum vide.
+
+
         # --- Site de vente principal ---
         page.click("#data-digital-home-marketplace-home")
-        #A finir de coder 
+
+        # >>> PAUSE INSPECTION ÉTAPE 1 (2 contrôles restants à cartographier) <<<
+        # Ce point est atteint AVANT select_categories : la page /details est
+        # entièrement chargée, on inspecte ici les DEUX contrôles restants.
+        #  (a) SITE DE VENTE : le contrôle ouvert/affiché par le clic ci-dessus
+        #      est-il le MÊME que le select FR de l'étape 3
+        #      (select[name="data[digital][home_marketplace]"]) ou distinct ?
+        #  (b) OPTION DE PUBLICATION : les 2 radios "Paraître maintenant" /
+        #      "Précommande" (défiler la page si besoin).
+        log(">>> PAUSE INSPECTION : m'envoyer (a) le sélecteur du contrôle 'site de "
+            "vente' + s'il est identique au select FR de l'étape 3, et (b) le "
+            "sélecteur des 2 radios 'Paraître maintenant' / 'Précommande'.")
+        page.pause()
+        # TODO(après clarif site de vente) : soit rien (FR posé en étape 3 suffit),
+        #                                    soit régler ici sur SITE_VENTE_PRINCIPAL_KDP.
 
         # --- Rubriques + classement (modal) ---
         select_categories(page, config)
@@ -189,7 +202,17 @@ def fill_book_details(page, config):
         # --- Mots-clés (7 champs) ---
         for i, mot in enumerate(mots_cles):
             page.fill(f"#data-keywords-{i}", mot)
-     
+
+
+        # --- Option de publication (obligatoire) ---
+        # config["option_publication"] : "Paraître maintenant" | "Précommande"
+        # (défaut = OPTION_PUBLICATION_KDP). Les DEUX cas doivent être gérés.
+        # /!\ Sélecteur des 2 radios à confirmer via la PAUSE INSPECTION plus haut
+        #     (pas de page.pause() ici : ce point n'est atteint qu'une fois les
+        #      catégories réparées, l'inspection se fait donc à la pause du dessus).
+        option_pub = config.get("option_publication", OPTION_PUBLICATION_KDP)
+        log(f"Option de publication cible : {option_pub!r} (sélecteur à coder).")
+        # TODO(après inspection) : cocher le radio correspondant à option_pub.
 
         # --- Enregistrer et continuer vers l'étape Contenu ---
         page.click("#save-and-continue")
@@ -789,7 +812,6 @@ def main():
 
             # Vérifie la session (et point d'entrée du login manuel à coder)
             ensure_logged_in(page, config)
-            page.pause()  # Pause après login pour inspection si nécessaire
 
             # Déroulement du workflow
             fill_book_details(page, config)       # /details -> clique Continuer
