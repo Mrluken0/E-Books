@@ -453,7 +453,7 @@ def use_cover_creator(context, page, config):
     """
     log("Étape 2.2 : Couverture...")
     try:
-        cover_path = config.get("couverture_path")
+        cover_path = config.get("cover_path")
 
         # --- Mode 1 : upload d'une couverture déjà prête ---
         if cover_path:
