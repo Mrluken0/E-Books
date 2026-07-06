@@ -30,6 +30,11 @@ LANG_MAP = {
     "ja": "japanese",
 }
 
+# Constantes étape 1 — communes à tous les livres de ce pipeline
+LANGUE_KDP = "Français"
+DROIT_PUBLICATION_KDP = "Je détiens les droits d'auteur et possède les droits de publication requis."
+SITE_VENTE_PRINCIPAL_KDP = "Amazon.fr"
+OPTION_PUBLICATION_KDP = "Paraître maintenant"
 
 def log(message):
     """Écrit les logs intermédiaires sur stderr pour ne pas polluer stdout."""
