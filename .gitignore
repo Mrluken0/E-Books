@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Profil navigateur Playwright/Chromium (lourd + données de session sensibles)
+kdp_profile/
+
+# Logs & artefacts de run
+*.log
+kdp_categories_tree.ancien-format-*.json
+
+# Scratch / analyses perso
+\#info.py

@@ -301,33 +301,47 @@ def _fill_description(page, description):
 
 def _normalize_categories(categories):
     """
-    Normalise config["categories"] en liste de rubriques {rubrique, classement, libelle}.
+    Normalise config["categories"] en liste d'entrées CASCADE :
+      {chemin_node_ids: [<nodeId L0>, ..., <nodeId dernier select>],
+       classement: <nodeId feuille>, libelle: <str>}
 
-    Format attendu (référentiel KDP par nodeId, vérifié en live 2026-07) :
+    Format attendu (cascade N niveaux par nodeId, aligné sur kdp_categories_tree.json) :
       "categories": [
-        {"rubrique": "156563011", "classement": "202437600011",
-         "libelle": "Développement personnel > Success"},
+        {"chemin_node_ids": ["156915011", "156968011"],
+         "classement": "156969011",
+         "libelle": "Droit > Code de la propriété intellectuelle > Communications"},
         ...   (3 rubriques maximum)
       ]
-      - rubrique   = nodeId de la rubrique de NIVEAU 0 (dans la value JSON de l'option
-                     du 1er <select> : {"level":0,"key":"<nom FR>","nodeId":"<id>"})
-      - classement = nodeId de la FEUILLE (case class="checkbox-<nodeId>", libellé anglais)
-      - libelle    = facultatif, purement informatif (logs)
+      - chemin_node_ids = liste ORDONNÉE des nodeId des <select> à poser, du niveau 0
+                          jusqu'au dernier select qui révèle la feuille de classement.
+                          (= champ "chemin_node_ids" d'une entrée du tree)
+      - classement      = nodeId de la FEUILLE (case class="checkbox-<nodeId>", libellé EN)
+                          (= "nodeId" d'une entrée de "feuilles" du tree)
+      - libelle         = facultatif, purement informatif (logs)
 
     Les nodeId sont indépendants de la langue et de l'orthographe -> robustes.
     (Ne PAS mettre de préfixe "Kindle Store"/"Kindle eBooks" : contexte déjà fixe.)
     """
     if isinstance(categories, dict):
         categories = [categories]
+    if not categories:
+        return []
     rubriques = []
     for cat in categories:
-        if not isinstance(cat, dict) or "rubrique" not in cat or "classement" not in cat:
+        if not isinstance(cat, dict) or "chemin_node_ids" not in cat or "classement" not in cat:
             raise Exception(
                 "Format categories invalide : chaque entrée doit être un objet "
-                "{'rubrique': <nodeId>, 'classement': <nodeId>}. Reçu : " + repr(cat)
+                "{'chemin_node_ids': [<nodeId L0>, ...], 'classement': <nodeId feuille>}. "
+                "Reçu : " + repr(cat)
+            )
+        chemin = cat["chemin_node_ids"]
+        if not isinstance(chemin, list) or not chemin or not all(chemin):
+            raise Exception(
+                "chemin_node_ids doit être une liste NON VIDE de nodeId "
+                "(L0 -> ... -> dernier select). Reçu : " + repr(chemin)
             )
         rubriques.append({
-            "rubrique": str(cat["rubrique"]),
+            "chemin_node_ids": [str(x) for x in chemin],
             "classement": str(cat["classement"]),
             "libelle": cat.get("libelle"),
         })
@@ -341,9 +355,10 @@ def select_categories(page, config):
     Mécanique VÉRIFIÉE EN LIVE (KDP fr_FR, ebook, 2026-07) :
       - Ouverture        : #categories-modal-button
       - Contexte fixe    : "Livres Kindle" (aucun préfixe Kindle Store/eBooks à saisir)
-      - Cascade niveau 0 : <select> natif ; chaque <option> porte une value JSON
-                           {"level":0,"key":"<nom FR>","nodeId":"<id>"} -> on choisit
-                           l'option dont la value contient "nodeId":"<rubrique>".
+      - Cascade N niveaux: <select> natifs en cascade ; chaque <option> porte une value
+                           JSON dont on extrait le nodeId -> on pose SUCCESSIVEMENT chaque
+                           niveau de chemin_node_ids (logique reprise de restaurer_chemin
+                           du scraper), en attendant l'apparition du niveau suivant.
       - Classement       : <input type=checkbox class="checkbox-<nodeId>"> (sans id/name,
                            libellé EN ANGLAIS) -> coché par la classe nodeId (fiable).
       - Ligne supplém.   : bouton "Ajouter une autre rubrique"
@@ -354,7 +369,8 @@ def select_categories(page, config):
         log("Aucune rubrique fournie — étape catégories ignorée.")
         return
 
-    log(f"Rubriques (nodeId) à sélectionner : {cats}")
+    log(f"Rubriques (cascade nodeId) à sélectionner : "
+        f"{[c['chemin_node_ids'] + ['✓' + c['classement']] for c in cats]}")
 
     page.click("#categories-modal-button")
     page.wait_for_timeout(1500)
@@ -362,40 +378,110 @@ def select_categories(page, config):
     for idx, cat in enumerate(cats):
         if idx > 0:
             _add_category_row(page)
-        _select_rubrique_by_node_id(page, cat["rubrique"])
+        _remplir_rubrique_cascade(page, cat["chemin_node_ids"], cat.get("libelle"))
         _check_classement_by_node_id(page, cat["classement"], cat.get("libelle"))
 
     _confirm_categories_modal(page)
 
 
-def _select_rubrique_by_node_id(page, node_id):
+# JS partagé : sélectionne, parmi les <select> du modal, celui qui propose l'option
+# portant `nodeId`, et pose sa value. L'extraction du nodeId depuis la value JSON de
+# l'option est IDENTIQUE à celle du scraper (kdp_categories_scraper) -> cohérence garantie
+# quelle que soit la clé utilisée par KDP (nodeId / id / stringVal).
+_JS_SELECT_NODE = """(nodeId) => {
+    const optNodeId = (opt) => {
+        const valAttr = opt.getAttribute('value');
+        if (!valAttr) return null;
+        try {
+            const data = JSON.parse(valAttr);
+            if (data) {
+                if (data.nodeId) return String(data.nodeId);
+                if (data.id) return String(data.id);
+                if (data.stringVal) {
+                    const internal = JSON.parse(data.stringVal);
+                    return String(internal.nodeId || internal.key);
+                }
+            }
+        } catch (e) { return valAttr; }
+        return valAttr;
+    };
+    const optOf = (s) => [...s.options].find(o => optNodeId(o) === nodeId);
+    const selects = [...document.querySelectorAll('select')];
+    // 1) priorité : un select encore sur son placeholder qui propose cette option
+    //    (= le bon niveau du bloc en cours de remplissage, jamais un bloc déjà figé)
+    let target = selects.find(s => s.selectedIndex === 0 && optOf(s));
+    // 2) sinon : un select déjà positionné sur cette valeur (idempotence / retry)
+    if (!target) target = selects.find(s => { const o = optOf(s); return o && s.value === o.value; });
+    // 3) sinon : n'importe quel select proposant l'option
+    if (!target) target = selects.find(s => optOf(s));
+    if (!target) return { ok: false, reason: 'aucun select ne propose nodeId=' + nodeId };
+    const opt = optOf(target);
+    if (target.value !== opt.value) {
+        target.value = opt.value;
+        target.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    return { ok: true, label: (opt.text || '').trim() };
+}"""
+
+# JS : un select ENCORE SUR PLACEHOLDER propose-t-il déjà l'option du nodeId donné ?
+# (sert à attendre que le niveau suivant de la cascade soit injecté par le XHR KDP)
+_JS_NIVEAU_PRET = """(nodeId) => {
+    const optNodeId = (opt) => {
+        const valAttr = opt.getAttribute('value');
+        if (!valAttr) return null;
+        try {
+            const data = JSON.parse(valAttr);
+            if (data) {
+                if (data.nodeId) return String(data.nodeId);
+                if (data.id) return String(data.id);
+                if (data.stringVal) {
+                    const internal = JSON.parse(data.stringVal);
+                    return String(internal.nodeId || internal.key);
+                }
+            }
+        } catch (e) { return valAttr; }
+        return valAttr;
+    };
+    return [...document.querySelectorAll('select')].some(
+        s => s.selectedIndex === 0 && [...s.options].some(o => optNodeId(o) === nodeId));
+}"""
+
+
+def _remplir_rubrique_cascade(page, chemin_node_ids, libelle=None):
     """
-    Sélectionne la rubrique de niveau 0 portant `node_id`, dans le dernier bloc de
-    rubrique encore vide, puis laisse charger les cases de classement (XHR KDP).
+    Pose SUCCESSIVEMENT chaque niveau de la cascade de rubriques par nodeId, du niveau 0
+    jusqu'au dernier select, en attendant l'injection du niveau suivant avant de continuer.
+    Reprend la logique validée de restaurer_chemin() du scraper (parcours séquentiel des
+    <select> avec attente entre chaque niveau), au lieu de l'unique sélection L0 d'avant.
+
+    Lève une exception CLAIRE dès qu'un nodeId de la cascade est introuvable à l'étape où
+    on l'attend, ou si le niveau suivant n'apparaît jamais après une sélection.
     """
-    found = page.evaluate(
-        """(nodeId) => {
-            const isL0 = s => s.options[0] &&
-                s.options[0].value.replace(/\\s/g, '') === '{"level":0}';
-            const l0 = [...document.querySelectorAll('select')].filter(isL0);
-            if (!l0.length) return { ok: false, reason: 'aucun select niveau 0' };
-            // dernier select niveau 0 encore sur le placeholder = bloc vide à remplir
-            const target = [...l0].reverse().find(s => s.selectedIndex === 0)
-                        || l0[l0.length - 1];
-            const opt = [...target.options].find(
-                o => (o.value || '').includes('"nodeId":"' + nodeId + '"'));
-            if (!opt) return { ok: false, reason: 'option nodeId introuvable' };
-            target.value = opt.value;
-            target.dispatchEvent(new Event('change', { bubbles: true }));
-            return { ok: true, label: opt.text.trim() };
-        }""",
-        node_id,
-    )
-    if not found or not found.get("ok"):
-        raison = found.get("reason") if found else "aucun retour"
-        raise Exception(f"Rubrique nodeId={node_id} non sélectionnée ({raison}).")
-    log(f"Rubrique sélectionnée : {found['label']} (nodeId={node_id}).")
-    page.wait_for_timeout(2000)  # laisse le XHR peupler les cases de classement
+    chemin_str = " > ".join(chemin_node_ids) + (f"  ({libelle})" if libelle else "")
+    for i, node_id in enumerate(chemin_node_ids):
+        res = page.evaluate(_JS_SELECT_NODE, node_id)
+        if not res or not res.get("ok"):
+            raison = res.get("reason") if res else "aucun retour"
+            raise Exception(
+                f"Cascade rubrique : niveau {i} (nodeId={node_id}) NON sélectionné "
+                f"({raison}). Chemin visé : [{chemin_str}]."
+            )
+        log(f"  Cascade niveau {i} : {res['label']} (nodeId={node_id}).")
+
+        if i < len(chemin_node_ids) - 1:
+            # Attend que le select du niveau suivant (avec SON option) soit injecté.
+            prochain = chemin_node_ids[i + 1]
+            try:
+                page.wait_for_function(_JS_NIVEAU_PRET, arg=prochain, timeout=TIMEOUT)
+            except TimeoutError:
+                raise Exception(
+                    f"Cascade rubrique : le niveau {i + 1} (nodeId={prochain}) n'est jamais "
+                    f"apparu après la sélection du niveau {i} (nodeId={node_id}). "
+                    f"chemin_node_ids invalide/incomplet ? Chemin visé : [{chemin_str}]."
+                )
+        else:
+            # Dernier select posé : laisse le XHR KDP peupler les cases de classement.
+            page.wait_for_timeout(2000)
 
 
 def _check_classement_by_node_id(page, node_id, libelle=None):
