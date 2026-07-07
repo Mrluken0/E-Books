@@ -1,3 +1,5 @@
+from email import parser
+
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -382,11 +384,19 @@ def main():
         help="Sous-catégorie ciblée (ex: \"Santé personnelle\"). Active le mode ciblé.")
     parser.add_argument("--angle", type=str, default=None,
         help="Angle éditorial auteur (angle_propose du Module 2).")
+    parser.add_argument("--config", type=str, default=None,
+        help="Chemin vers un fichier JSON contenant category/angle (évite les problèmes "
+             "d'échappement shell avec apostrophes, accents, guillemets).")
     args = parser.parse_args()
 
-    print(f"Lecture du radar : {RADAR_FILE}", file=sys.stderr)
-    df_scores = pd.read_excel(RADAR_FILE, sheet_name="scores")
-    df_data   = pd.read_excel(RADAR_FILE, sheet_name="data")
+    if args.config:
+        with open(args.config, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+        args.category = config_data.get("category", args.category)
+        args.angle = config_data.get("angle", args.angle)
+        print(f"Lecture du radar : {RADAR_FILE}", file=sys.stderr)
+        df_scores = pd.read_excel(RADAR_FILE, sheet_name="scores")
+        df_data   = pd.read_excel(RADAR_FILE, sheet_name="data")
 
     # MODE CIBLÉ
     if args.category:
