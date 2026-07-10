@@ -126,6 +126,8 @@ def fill_book_details(page, config):
         prenom = nom_complet[0]
         nom = nom_complet[1] if len(nom_complet) > 1 else ""
 
+        page.pause()
+
         # --- Mots-clés : split sur VIRGULE (corrigé), 7 max, trim des espaces ---
         mots_cles = [m.strip() for m in config["mots_cles"].split(",") if m.strip()][:7]
         log(f"Mots-clés préparés ({len(mots_cles)}) : {mots_cles}")
@@ -200,6 +202,7 @@ def fill_book_details(page, config):
         # --- Option de publication (Paraître maintenant / Précommande) ---
         _set_publish_option(page, config.get("option_publication", OPTION_PUBLICATION_KDP))
 
+        
         # --- Rubriques + classement (modal) ---
         select_categories(page, config)
 
@@ -372,12 +375,18 @@ def select_categories(page, config):
     log(f"Rubriques (cascade nodeId) à sélectionner : "
         f"{[c['chemin_node_ids'] + ['✓' + c['classement']] for c in cats]}")
 
-    page.click("#categories-modal-button")
-    page.wait_for_timeout(1500)
+    # Ouverture + attente CIBLÉE que la cascade niveau 0 soit réellement prête
+    # (remplace l'ancien click + wait_for_timeout(1500) fixe, cause du bug).
+    _open_categories_modal(page, cats[0]["chemin_node_ids"][0])
 
     for idx, cat in enumerate(cats):
         if idx > 0:
             _add_category_row(page)
+        # Point d'inspection live à la demande (ne bloque pas les runs n8n) :
+        #   PowerShell : $env:KDP_PAUSE_CASCADE=1 ; python book_publisher.py --config ...
+        if os.environ.get("KDP_PAUSE_CASCADE"):
+            log("KDP_PAUSE_CASCADE actif — pause juste avant la cascade rubrique.")
+            page.pause()
         _remplir_rubrique_cascade(page, cat["chemin_node_ids"], cat.get("libelle"))
         _check_classement_by_node_id(page, cat["classement"], cat.get("libelle"))
 
@@ -445,6 +454,108 @@ _JS_NIVEAU_PRET = """(nodeId) => {
     return [...document.querySelectorAll('select')].some(
         s => s.selectedIndex === 0 && [...s.options].some(o => optNodeId(o) === nodeId));
 }"""
+
+# JS de DIAGNOSTIC : photographie l'état de la modal catégories à un instant T, pour
+# départager sans humain « la modal ne s'est pas ouverte » vs « les <select> ne sont
+# pas encore montés/peuplés » vs « le nodeId L0 n'existe pas dans l'arbre KDP ».
+_JS_DIAG_MODAL = """(nodeId) => {
+    const optNodeId = (opt) => {
+        const valAttr = opt.getAttribute('value');
+        if (!valAttr) return null;
+        try {
+            const data = JSON.parse(valAttr);
+            if (data) {
+                if (data.nodeId) return String(data.nodeId);
+                if (data.id) return String(data.id);
+                if (data.stringVal) {
+                    const internal = JSON.parse(data.stringVal);
+                    return String(internal.nodeId || internal.key);
+                }
+            }
+        } catch (e) { return valAttr; }
+        return valAttr;
+    };
+    const visible = (el) => !!(el && (el.offsetParent !== null ||
+        (el.getClientRects && el.getClientRects().length)));
+    const selects = [...document.querySelectorAll('select')];
+    const placeholders = selects.filter(s => s.selectedIndex === 0);
+    const modal = document.querySelector(
+        '#categories-modal, [role="dialog"], .a-popover-modal, .a-modal-scroller');
+    const btn = document.querySelector('#categories-modal-button');
+    const adult = [...document.querySelectorAll('input[name="data[is_adult_content]-radio"]')];
+    return {
+        btnDisabled: btn ? (btn.disabled || btn.getAttribute('aria-disabled') === 'true') : null,
+        adultQuestionAnswered: adult.some(r => r.checked),  // prérequis d'activation du bouton
+        modalPresent: !!modal,
+        modalVisible: visible(modal),
+        selectCount: selects.length,
+        visibleSelectCount: selects.filter(visible).length,
+        placeholderSelectCount: placeholders.length,
+        // aperçu des nodeId proposés par le 1er select encore sur placeholder
+        firstPlaceholderNodeIds: placeholders.length
+            ? [...placeholders[0].options].slice(0, 8).map(optNodeId) : [],
+        nodeIdProposed: selects.some(s => [...s.options].some(o => optNodeId(o) === nodeId)),
+    };
+}"""
+
+
+def _open_categories_modal(page, first_node_id):
+    """
+    Ouvre la modal des rubriques et ATTEND que la cascade soit réellement prête :
+    qu'un <select> encore sur son placeholder propose déjà le nodeId du niveau 0.
+
+    Remplace l'ancien `click + wait_for_timeout(1500)` fixe (cause du bug « aucun
+    select ne propose nodeId=... » au niveau 0). Robuste aux deux échecs possibles :
+      - clic d'ouverture silencieusement perdu (bouton hors viewport / recouvert
+        par un overlay) -> scroll + fallback clic JS ;
+      - <select> montés/peuplés par un XHR KDP APRÈS le clic (1500 ms trop court)
+        -> on attend le nodeId L0 au lieu d'un délai en dur.
+
+    En cas d'échec, journalise un DIAGNOSTIC qui tranche entre les hypothèses.
+    """
+    # 0) Le bouton reste DÉSACTIVÉ tant que la question « Images/contenu à connotation
+    #    sexuelle » (data[is_adult_content]-radio) n'a pas de réponse — vérifié en live :
+    #    KDP affiche « Répondez à la question concernant la catégorie réservée aux adultes
+    #    avant de sélectionner… ». On attend donc qu'il soit RÉELLEMENT actionnable, avec
+    #    un diagnostic ciblé sinon (au lieu d'un time-out Playwright opaque sur le clic).
+    btn = page.wait_for_selector("#categories-modal-button", state="visible", timeout=TIMEOUT)
+    try:
+        page.wait_for_function(
+            "() => { const b = document.querySelector('#categories-modal-button');"
+            " return b && !b.disabled && b.getAttribute('aria-disabled') !== 'true'; }",
+            timeout=TIMEOUT,
+        )
+    except TimeoutError:
+        raise Exception(
+            "Bouton 'Choisissez des rubriques' (#categories-modal-button) resté DÉSACTIVÉ : "
+            "la question « contenu à connotation sexuelle » (data[is_adult_content]-radio) "
+            "n'a pas été répondue en amont. Vérifier l'étape 'contenu adulte' "
+            "(page.check value=false) avant select_categories."
+        )
+
+    # 1) Clic d'ouverture fiabilisé
+    btn.scroll_into_view_if_needed()
+    try:
+        btn.click()
+    except Exception:
+        # Un overlay intercepte le clic natif -> clic JS direct sur le bouton.
+        page.evaluate("() => document.querySelector('#categories-modal-button')?.click()")
+
+    # 2) Attente CIBLÉE : cascade niveau 0 prête (select placeholder proposant le nodeId)
+    try:
+        page.wait_for_function(_JS_NIVEAU_PRET, arg=first_node_id, timeout=TIMEOUT)
+    except TimeoutError:
+        diag = page.evaluate(_JS_DIAG_MODAL, first_node_id)
+        log(f"DIAGNOSTIC modal catégories (nodeId L0={first_node_id}) : {diag}")
+        raise Exception(
+            f"Modal catégories : le niveau 0 (nodeId={first_node_id}) n'est jamais "
+            f"devenu disponible après clic sur #categories-modal-button. "
+            f"Diagnostic : {diag}. "
+            "Lecture : modalPresent/Visible=false => le clic d'ouverture n'a pas "
+            "pris (bouton masqué/overlay) ; selectCount=0 => <select> non montés "
+            "(XHR KDP lent/échoué) ; nodeIdProposed=false avec des selects présents "
+            "=> nodeId L0 absent de l'arbre KDP (config/scraper à revoir)."
+        )
 
 
 def _remplir_rubrique_cascade(page, chemin_node_ids, libelle=None):
