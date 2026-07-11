@@ -835,9 +835,54 @@ def use_cover_creator(context, page, config):
                 raise FileNotFoundError(f"Couverture introuvable : {cover_path}")
             log(f"Upload de la couverture : {cover_path}")
             page.set_input_files("#data-assets-cover-file-upload-AjaxInput", cover_path)
-            page.wait_for_selector(
-                "#data-assets-cover-file-upload-success", state="visible", timeout=120000
+
+            # /!\ NE PAS attendre state="visible" sur #...-success : cet élément (et son
+            # pendant d'erreur #...-failure) vit dans l'accordéon "Couverture" REPLIÉ
+            # (#a-accordion-auto-...  en display:none). Playwright ne le verra JAMAIS
+            # "visible" (offset 0x0, offsetParent null) même après un upload RÉUSSI.
+            # Vérifié en live 2026-07 : POST .../DIGITAL_BOOK_COVER -> 201 (validation OK),
+            # KDP retire alors la classe `a-hidden` du success SANS le rendre géométriquement
+            # visible. On s'appuie donc sur `a-hidden` (le vrai signal KDP), pas sur la
+            # visibilité. Séquence observée : a-hidden AJOUTÉE au success pendant l'upload,
+            # puis RETIRÉE à la fin (ou a-hidden retirée de #...-failure en cas de rejet).
+            _SUCC = "#data-assets-cover-file-upload-success"
+            _FAIL = "#data-assets-cover-file-upload-failure"
+
+            # Phase 1 (best-effort) : laisser l'upload s'enregistrer (KDP ajoute a-hidden
+            # au success). Toléré si manqué (upload/branche déjà traité très vite).
+            try:
+                page.wait_for_function(
+                    "() => { const ok = document.querySelector('%s');"
+                    " return ok && ok.classList.contains('a-hidden'); }" % _SUCC,
+                    timeout=15000,
+                )
+            except TimeoutError:
+                pass
+
+            # Phase 2 : fin de traitement — success ré-affiché (a-hidden retiré) OU
+            # erreur affichée (a-hidden retiré de #...-failure).
+            page.wait_for_function(
+                "() => {"
+                " const ok = document.querySelector('%s');"
+                " const ko = document.querySelector('%s');"
+                " const okShown = ok && !ok.classList.contains('a-hidden');"
+                " const koShown = ko && !ko.classList.contains('a-hidden');"
+                " return okShown || koShown; }" % (_SUCC, _FAIL),
+                timeout=120000,
             )
+
+            # Rejet éventuel (dimensions/format/poids) : l'alerte d'erreur perd a-hidden.
+            ko_shown = page.evaluate(
+                "() => { const ko = document.querySelector('%s');"
+                " return !!(ko && !ko.classList.contains('a-hidden')); }" % _FAIL
+            )
+            if ko_shown:
+                msg = page.evaluate(
+                    "() => { const ko = document.querySelector('%s');"
+                    " return (ko.innerText || '').replace(/\\s+/g, ' ').trim(); }" % _FAIL
+                )
+                raise Exception(f"KDP a rejeté la couverture uploadée : {msg}")
+
             log("Couverture téléchargée avec succès.")
             return
 
