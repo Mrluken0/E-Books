@@ -105,6 +105,9 @@ def ensure_logged_in(page, config):
     # >>> Insère ICI ton code de connexion (voir docstring ci-dessus). <<<
     email = config["email"]
     mdp = config["mot_de_passe"]
+    
+    page.pause()
+
     page.fill("#ap_email", email)
     page.click("#continue")
     page.fill("#ap_password", mdp)
@@ -168,7 +171,8 @@ def fill_book_details(page, config):
         # --- Auteur principal ---
         page.fill("#data-primary-author-first-name", prenom)
         page.fill("#data-primary-author-last-name", nom)
-
+        
+        page.pause()  # Pause pour vérifier le remplissage avant de continuer
         
         # --- Description (CKEditor, voir helper dédié) ---
         _fill_description(page, config["description"])
