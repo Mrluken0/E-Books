@@ -815,7 +815,7 @@ def use_cover_creator(context, page, config):
     Gère la couverture (toujours sur la page /content).
 
     Deux modes selon la config :
-      1. config["couverture_path"] fourni  -> UPLOAD d'une couverture perso
+      1. config["cover_path"] fourni  -> UPLOAD d'une couverture perso
          (recommandé : fiable et entièrement automatisable).
          Input caché vérifié : #data-assets-cover-file-upload-AjaxInput
          (formats acceptés : .jpg/.jpeg/.tiff/.tif)
