@@ -23,6 +23,8 @@ import glob
 import json
 import argparse
 import unicodedata
+import urllib.request
+import urllib.error
 from PIL import Image, ImageDraw, ImageFont, ImageStat, ImageFilter
 
 # --- ENCODAGE (même convention que extract_for_validation.py / Prompt_sender.py) ---
@@ -38,17 +40,88 @@ def log(*args):
     print(*args, file=sys.stderr, flush=True)
 
 # --------------------------------------------------------------------------- #
-#  Polices
+#  Polices — cache local persistant + téléchargement paresseux depuis GitHub.
+#
+#  En prod, le script est exécuté depuis un fichier temporaire téléchargé (les
+#  assets ne sont donc PAS à côté de __file__). On résout chaque .ttf via un
+#  cache local persistant (jamais supprimé auto), en ne téléchargeant QUE les
+#  familles réellement utilisées par le run (voir load_font/_font_file, appelés
+#  uniquement pour la famille choisie + DancingScript si script_author).
 # --------------------------------------------------------------------------- #
-FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "fonts")
+# Cache overridable par env ; défaut hors du dossier temporaire du script.
+FONT_DIR = os.environ.get("COVER_COMPOSER_FONT_DIR", r"C:/LKN_Digital/KDP/assets/fonts")
+
+_GH_REPO = "Mrluken0/E-Books"
+_GH_CONTENTS = "https://api.github.com/repos/{repo}/contents/assets/fonts/{folder}"
+_GH_RAW = "https://raw.githubusercontent.com/{repo}/main/assets/fonts/{folder}/{name}"
+_HTTP_HEADERS = {"User-Agent": "cover-composer/1.0"}
+
+
+def _cached_ttf(family_folder):
+    """Retourne le .ttf en cache local pour cette famille, ou None."""
+    hits = glob.glob(os.path.join(FONT_DIR, family_folder, "*.ttf"))
+    return hits[0] if hits else None
+
+
+def _download_font(family_folder):
+    """Télécharge le 1er .ttf de assets/fonts/<family_folder>/ (GitHub) vers le cache.
+
+    Toute défaillance réseau/404/rate-limit est convertie en RuntimeError explicite
+    (capturée par le try/except de main() -> JSON status:error).
+    """
+    url = _GH_CONTENTS.format(repo=_GH_REPO, folder=family_folder)
+    try:
+        req = urllib.request.Request(url, headers=_HTTP_HEADERS)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            listing = json.load(r)
+    except urllib.error.HTTPError as e:
+        raison = "rate-limit GitHub" if e.code in (403, 429) else \
+                 f"famille absente du repo (HTTP 404)" if e.code == 404 else f"HTTP {e.code}"
+        raise RuntimeError(f"Téléchargement police {family_folder} échoué: {raison}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Téléchargement police {family_folder} échoué: réseau ({e.reason})")
+    except Exception as e:
+        raise RuntimeError(f"Téléchargement police {family_folder} échoué: {e}")
+
+    if not isinstance(listing, list):
+        raise RuntimeError(
+            f"Téléchargement police {family_folder} échoué: réponse GitHub inattendue")
+    ttfs = [x for x in listing
+            if isinstance(x, dict) and str(x.get("name", "")).lower().endswith(".ttf")]
+    if not ttfs:
+        raise RuntimeError(
+            f"Téléchargement police {family_folder} échoué: aucun .ttf dans assets/fonts/{family_folder}")
+
+    entry = ttfs[0]
+    name = entry["name"]
+    dl_url = entry.get("download_url") or _GH_RAW.format(repo=_GH_REPO, folder=family_folder, name=name)
+
+    log(f"  [font] téléchargement {family_folder}/{name} ...")
+    try:
+        req = urllib.request.Request(dl_url, headers=_HTTP_HEADERS)
+        with urllib.request.urlopen(req, timeout=60) as r:
+            data = r.read()
+    except Exception as e:
+        raise RuntimeError(f"Téléchargement police {family_folder} échoué: {e}")
+
+    dest_dir = os.path.join(FONT_DIR, family_folder)
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, name)
+    tmp = dest + ".part"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, dest)   # écriture atomique -> pas de .ttf tronqué en cache
+    log(f"  [font] mis en cache : {dest} ({len(data) // 1024} Ko)")
+    return dest
 
 
 def _font_file(family_folder):
-    """Premier .ttf trouvé dans assets/fonts/<family_folder>/."""
-    hits = glob.glob(os.path.join(FONT_DIR, family_folder, "*.ttf"))
-    if not hits:
-        raise FileNotFoundError(f"Police introuvable : {family_folder} dans {FONT_DIR}")
-    return hits[0]
+    """Résout le .ttf d'une famille : cache local d'abord, sinon GitHub (paresseux)."""
+    cached = _cached_ttf(family_folder)
+    if cached:
+        log(f"  [font] cache hit : {family_folder}")
+        return cached
+    return _download_font(family_folder)
 
 
 # nom logique -> dossier
