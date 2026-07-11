@@ -126,7 +126,6 @@ def fill_book_details(page, config):
         prenom = nom_complet[0]
         nom = nom_complet[1] if len(nom_complet) > 1 else ""
 
-        page.pause()
 
         # --- Mots-clés : split sur VIRGULE (corrigé), 7 max, trim des espaces ---
         mots_cles = [m.strip() for m in config["mots_cles"].split(",") if m.strip()][:7]
@@ -198,6 +197,8 @@ def fill_book_details(page, config):
             value=MARKETPLACE_MAP.get(SITE_VENTE_PRINCIPAL_KDP, "FR"),
         )
         page.wait_for_timeout(1500)
+
+        #page.pause()
 
         # --- Option de publication (Paraître maintenant / Précommande) ---
         _set_publish_option(page, config.get("option_publication", OPTION_PUBLICATION_KDP))
@@ -376,7 +377,9 @@ def select_categories(page, config):
         f"{[c['chemin_node_ids'] + ['✓' + c['classement']] for c in cats]}")
 
     # Ouverture + attente CIBLÉE que la cascade niveau 0 soit réellement prête
-    # (remplace l'ancien click + wait_for_timeout(1500) fixe, cause du bug).
+    # (remplace l'ancien click + wait_for_timeout(1500) fixe, cause du bug : dans le
+    # profil Playwright à cache FROID, l'arbre des rubriques est récupéré sur le réseau
+    # à la 1re ouverture et peut dépasser 1500 ms).
     _open_categories_modal(page, cats[0]["chemin_node_ids"][0])
 
     for idx, cat in enumerate(cats):
@@ -483,18 +486,35 @@ _JS_DIAG_MODAL = """(nodeId) => {
         '#categories-modal, [role="dialog"], .a-popover-modal, .a-modal-scroller');
     const btn = document.querySelector('#categories-modal-button');
     const adult = [...document.querySelectorAll('input[name="data[is_adult_content]-radio"]')];
+    const lang = document.querySelector('#data-language-native');
+    // Détail PAR select : révèle un select cascade monté mais VIDE (optionCount<=1)
+    // vs peuplé avec d'autres nodeId. On ignore les selects natifs connus du form.
+    const known = ['data-language-native', 'data-contributors', 'reading-interest',
+                   'home_marketplace'];
+    const allSelects = selects.map(s => {
+        const idn = s.id || s.name || '(anon)';
+        return {
+            id: idn,
+            n: s.options.length,
+            sel: s.selectedIndex,
+            vis: visible(s),
+            // échantillon des options (texte court + nodeId) — sauf pour les selects connus
+            opts: known.some(k => idn.includes(k)) ? '(select form connu)'
+                : [...s.options].slice(0, 5).map(o => ({ t: (o.text || '').trim().slice(0, 22), nid: optNodeId(o) })),
+        };
+    });
     return {
         btnDisabled: btn ? (btn.disabled || btn.getAttribute('aria-disabled') === 'true') : null,
         adultQuestionAnswered: adult.some(r => r.checked),  // prérequis d'activation du bouton
+        langValue: lang ? lang.value : null,               // la langue a-t-elle bien "pris" ?
         modalPresent: !!modal,
         modalVisible: visible(modal),
+        modalText: modal ? (modal.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 500) : null,
         selectCount: selects.length,
         visibleSelectCount: selects.filter(visible).length,
         placeholderSelectCount: placeholders.length,
-        // aperçu des nodeId proposés par le 1er select encore sur placeholder
-        firstPlaceholderNodeIds: placeholders.length
-            ? [...placeholders[0].options].slice(0, 8).map(optNodeId) : [],
         nodeIdProposed: selects.some(s => [...s.options].some(o => optNodeId(o) === nodeId)),
+        allSelects: allSelects,
     };
 }"""
 
@@ -505,19 +525,20 @@ def _open_categories_modal(page, first_node_id):
     qu'un <select> encore sur son placeholder propose déjà le nodeId du niveau 0.
 
     Remplace l'ancien `click + wait_for_timeout(1500)` fixe (cause du bug « aucun
-    select ne propose nodeId=... » au niveau 0). Robuste aux deux échecs possibles :
-      - clic d'ouverture silencieusement perdu (bouton hors viewport / recouvert
-        par un overlay) -> scroll + fallback clic JS ;
-      - <select> montés/peuplés par un XHR KDP APRÈS le clic (1500 ms trop court)
-        -> on attend le nodeId L0 au lieu d'un délai en dur.
+    select ne propose nodeId=... » au niveau 0). Robuste aux échecs possibles :
+      - bouton désactivé (question « contenu adulte » non répondue) -> exception ciblée ;
+      - clic d'ouverture silencieusement perdu (bouton hors viewport / recouvert par
+        un overlay) -> scroll + fallback clic JS ;
+      - arbre des rubriques récupéré sur le réseau APRÈS le clic (cache froid du profil
+        Playwright, 1500 ms trop court) -> on attend le nodeId L0 au lieu d'un délai en dur.
 
     En cas d'échec, journalise un DIAGNOSTIC qui tranche entre les hypothèses.
     """
     # 0) Le bouton reste DÉSACTIVÉ tant que la question « Images/contenu à connotation
     #    sexuelle » (data[is_adult_content]-radio) n'a pas de réponse — vérifié en live :
     #    KDP affiche « Répondez à la question concernant la catégorie réservée aux adultes
-    #    avant de sélectionner… ». On attend donc qu'il soit RÉELLEMENT actionnable, avec
-    #    un diagnostic ciblé sinon (au lieu d'un time-out Playwright opaque sur le clic).
+    #    avant de sélectionner… ». On attend qu'il soit RÉELLEMENT actionnable, avec un
+    #    diagnostic ciblé sinon (au lieu d'un time-out Playwright opaque sur le clic).
     btn = page.wait_for_selector("#categories-modal-button", state="visible", timeout=TIMEOUT)
     try:
         page.wait_for_function(
@@ -533,29 +554,60 @@ def _open_categories_modal(page, first_node_id):
             "(page.check value=false) avant select_categories."
         )
 
-    # 1) Clic d'ouverture fiabilisé
-    btn.scroll_into_view_if_needed()
-    try:
-        btn.click()
-    except Exception:
-        # Un overlay intercepte le clic natif -> clic JS direct sur le bouton.
-        page.evaluate("() => document.querySelector('#categories-modal-button')?.click()")
+    # Capture réseau CIBLÉE : la modal peuple son select L0 via un POST
+    # .../browse-nodes/get-root-nodes/ (vérifié en live 2026-07-10). Quand la cascade
+    # reste vide, la vraie cause est presque toujours CE POST (statut != 200 ou corps
+    # vide selon la session/marketplace du profil). On journalise son statut + un extrait.
+    captured = []      # {url, status} — rempli SYNCHRONEMENT dans le handler
+    _resp_objs = []    # (info, response) — corps lus APRÈS, hors du callback
 
-    # 2) Attente CIBLÉE : cascade niveau 0 prête (select placeholder proposant le nodeId)
+    def _on_response(resp):
+        # /!\ API sync Playwright : NE PAS appeler resp.text() ici (aller-retour
+        # navigateur depuis un callback d'event -> DEADLOCK). On ne lit que url/status
+        # (dispo sans round-trip) et on diffère la lecture du corps hors du handler.
+        try:
+            if "browse-nodes" in resp.url or "get-root-nodes" in resp.url:
+                info = {"url": resp.url.split("/details/")[-1], "status": resp.status}
+                captured.append(info)
+                _resp_objs.append((info, resp))
+        except Exception:
+            pass
+
+    page.on("response", _on_response)
     try:
-        page.wait_for_function(_JS_NIVEAU_PRET, arg=first_node_id, timeout=TIMEOUT)
-    except TimeoutError:
-        diag = page.evaluate(_JS_DIAG_MODAL, first_node_id)
-        log(f"DIAGNOSTIC modal catégories (nodeId L0={first_node_id}) : {diag}")
-        raise Exception(
-            f"Modal catégories : le niveau 0 (nodeId={first_node_id}) n'est jamais "
-            f"devenu disponible après clic sur #categories-modal-button. "
-            f"Diagnostic : {diag}. "
-            "Lecture : modalPresent/Visible=false => le clic d'ouverture n'a pas "
-            "pris (bouton masqué/overlay) ; selectCount=0 => <select> non montés "
-            "(XHR KDP lent/échoué) ; nodeIdProposed=false avec des selects présents "
-            "=> nodeId L0 absent de l'arbre KDP (config/scraper à revoir)."
-        )
+        # 1) Clic d'ouverture fiabilisé
+        btn.scroll_into_view_if_needed()
+        try:
+            btn.click()
+        except Exception:
+            # Un overlay intercepte le clic natif -> clic JS direct sur le bouton.
+            page.evaluate("() => document.querySelector('#categories-modal-button')?.click()")
+
+        # 2) Attente CIBLÉE : cascade niveau 0 prête (select placeholder proposant le nodeId)
+        try:
+            page.wait_for_function(_JS_NIVEAU_PRET, arg=first_node_id, timeout=TIMEOUT)
+        except TimeoutError:
+            diag = page.evaluate(_JS_DIAG_MODAL, first_node_id)
+            # Lecture des corps MAINTENANT (hors callback -> pas de deadlock sync).
+            for info, resp in _resp_objs:
+                try:
+                    body = resp.text()
+                    info["len"] = len(body)
+                    info["snippet"] = body[:300]
+                except Exception as e:
+                    info["bodyErr"] = str(e)
+            log(f"DIAGNOSTIC modal catégories (nodeId L0={first_node_id}) : {diag}")
+            log(f"DIAGNOSTIC réseau get-root-nodes : {captured or 'AUCUN POST browse-nodes capturé'}")
+            raise Exception(
+                f"Modal catégories : le niveau 0 (nodeId={first_node_id}) n'est jamais "
+                f"devenu disponible après clic sur #categories-modal-button. "
+                f"Diagnostic DOM : {diag}. Réseau get-root-nodes : {captured}. "
+                "Lecture : POST get-root-nodes absent => clic n'a pas déclenché le fetch ; "
+                "status != 200 => fetch refusé (session/marketplace du profil kdp-profile) ; "
+                "status 200 mais corps court/vide => l'arbre revient vide pour cette session."
+            )
+    finally:
+        page.remove_listener("response", _on_response)
 
 
 def _remplir_rubrique_cascade(page, chemin_node_ids, libelle=None):
@@ -661,7 +713,11 @@ def upload_content(page, config):
     """
     log("Étape 2 : Contenu (IA, DRM, manuscrit)...")
     try:
-        page.wait_for_selector("#data-assets-interior-file-upload-AjaxInput", timeout=TIMEOUT)
+        # L'input fichier est CACHÉ par design (déclenché par un bouton stylé KDP) :
+        # attendre 'attached', pas 'visible' (sinon timeout) — set_input_files gère le hidden.
+        page.wait_for_selector(
+            "#data-assets-interior-file-upload-AjaxInput", state="attached", timeout=TIMEOUT
+        )
 
         # --- Déclaration de contenu généré par IA (OBLIGATOIRE pour continuer) ---
         _fill_ai_questionnaire(page, config)
@@ -717,9 +773,37 @@ def _fill_ai_questionnaire(page, config):
             "avec les clés 'texte', 'images', 'traductions' (déclaration obligatoire KDP)."
         )
 
-    page.select_option("#generative-ai-questionnaire-text", value=ia["texte"])
-    page.select_option("#generative-ai-questionnaire-images", value=ia["images"])
-    page.select_option("#generative-ai-questionnaire-translations", value=ia["traductions"])
+    # Les 3 <select> IA sont des dropdowns AUI NATIFS CACHÉS (tabindex=-1,
+    # a-native-dropdown) : page.select_option échoue ("element is not visible").
+    # On pose la valeur en JS + dispatch 'change' (même contournement que la langue
+    # à l'étape 1). Validation stricte de l'option (déclaration légale).
+    for sel_id, val in (
+        ("generative-ai-questionnaire-text", ia["texte"]),
+        ("generative-ai-questionnaire-images", ia["images"]),
+        ("generative-ai-questionnaire-translations", ia["traductions"]),
+    ):
+        # Le questionnaire IA (AUI natif caché) peut être monté APRÈS l'input
+        # manuscrit -> attendre sa présence (attached, pas visible) avant de poser.
+        page.wait_for_selector(f"#{sel_id}", state="attached", timeout=TIMEOUT)
+        res = page.evaluate(
+            """([id, val]) => {
+                const s = document.getElementById(id);
+                if (!s) return { ok: false, reason: 'select introuvable' };
+                const opt = [...s.options].find(o => o.value === val);
+                if (!opt) return { ok: false, reason: 'option absente',
+                                   dispo: [...s.options].map(o => o.value) };
+                s.value = val;
+                s.dispatchEvent(new Event('change', { bubbles: true }));
+                return { ok: true };
+            }""",
+            [sel_id, val],
+        )
+        if not res or not res.get("ok"):
+            raise Exception(
+                f"Déclaration IA : impossible de poser #{sel_id}={val} "
+                f"({(res or {}).get('reason', 'no ret')}; options dispo="
+                f"{(res or {}).get('dispo')})."
+            )
     log(f"Déclaration IA : texte={ia['texte']}, images={ia['images']}, traductions={ia['traductions']}")
 
 
@@ -760,23 +844,31 @@ def use_cover_creator(context, page, config):
         # --- Mode 2 : Créateur de Couverture KDP ---
         log("Lancement du Créateur de Couverture KDP...")
         launch = "#data-assets-cover-cover-creator-cover-launch-button-announce"
-        page.wait_for_selector(launch, timeout=TIMEOUT)
+        launch_id = "data-assets-cover-cover-creator-cover-launch-button-announce"
+        page.wait_for_selector(launch, state="visible", timeout=TIMEOUT)
+        page.locator(launch).scroll_into_view_if_needed()
 
-        # /!\ Vérifié en live : le studio NE s'ouvre PAS dans un nouvel onglet et
-        # n'est PAS une iframe. Il NAVIGUE LE MÊME ONGLET vers cc.amazon.com/layout
-        # (avec token + designId + redirectOverride qui ramène vers /content).
-        # On gère quand même le cas "nouvel onglet" par sécurité.
+        # /!\ Vérifié en live : le studio NAVIGUE LE MÊME ONGLET vers cc.amazon.com/layout
+        # (pas de nouvel onglet, pas d'iframe ; token + designId + redirectOverride).
         cc_page = page
+        page.click(launch)
         try:
-            with context.expect_page(timeout=5000) as new_page_info:
-                page.click(launch)
-            cc_page = new_page_info.value  # cas rare : popup/onglet
-            cc_page.wait_for_load_state()
-            log("Créateur de Couverture ouvert dans un nouvel onglet.")
-        except TimeoutError:
-            # Cas nominal : navigation in-place vers cc.amazon.com
-            cc_page.wait_for_url("**cc.amazon.com/**", timeout=TIMEOUT)
+            cc_page.wait_for_url("**cc.amazon.com/**", timeout=60000)
             log("Créateur de Couverture chargé (même onglet, cc.amazon.com).")
+        except TimeoutError:
+            # Le clic Playwright n'a pas déclenché la navigation. Diagnostic (URL +
+            # éventuel modal intermédiaire sur un brouillon frais) puis fallback clic JS
+            # (le bouton -announce délègue le handler, confirmé en live).
+            diag = page.evaluate(
+                """() => {
+                    const m = document.querySelector('[role=dialog], .a-popover-modal, .a-modal-scroller');
+                    return { url: location.href.slice(0, 90),
+                             modal: m ? (m.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 300) : null }; }"""
+            )
+            log(f"DIAG lancement cover (nav cc.amazon.com absente) : {diag}")
+            page.evaluate(f"() => document.getElementById('{launch_id}')?.click()")
+            cc_page.wait_for_url("**cc.amazon.com/**", timeout=60000)
+            log("Créateur de Couverture chargé (après fallback clic JS).")
 
         _drive_cover_creator(cc_page, config)
 
@@ -793,6 +885,67 @@ def use_cover_creator(context, page, config):
         raise Exception(f"Timeout étape 2.2 (couverture) — sélecteur introuvable : {str(e)}")
     except Exception as e:
         raise Exception(f"Erreur étape 2.2 (couverture) : {str(e)}")
+
+
+# JS de DIAGNOSTIC du studio Cover Creator (cc.amazon.com). L'extension Chrome
+# est bloquée sur ce domaine, mais Playwright y a accès : on cartographie le DOM
+# (template, zones texte titre/auteur, mécanisme d'application de l'image uploadée)
+# via un dump texte, puisque la sélection y est graphique (canvas, ids base64).
+_JS_DIAG_CC = """([titre, auteur]) => {
+    const vis = el => !!(el && (el.offsetParent !== null ||
+        (el.getClientRects && el.getClientRects().length)));
+    const desc = (el) => {
+        const id = el.id ? '#' + el.id : '';
+        const cls = (typeof el.className === 'string' && el.className.trim())
+            ? '.' + el.className.trim().split(/\\s+/).slice(0, 3).join('.') : '';
+        const data = [...el.attributes].filter(a => a.name.startsWith('data-'))
+            .slice(0, 3).map(a => `[${a.name}=${(a.value || '').slice(0, 18)}]`).join('');
+        return (el.tagName.toLowerCase() + id + cls + data).slice(0, 130);
+    };
+    const clickable = [...document.querySelectorAll(
+        'button,a,[role=button],.a-button-input,input[type=button],input[type=submit]')]
+        .filter(vis).map(el => ({ d: desc(el), t: (el.textContent || el.value || '').trim().slice(0, 45) }))
+        .filter(x => x.t || x.d);
+    const inputs = [...document.querySelectorAll(
+        'input,textarea,select,[contenteditable=true],[contenteditable=""]')]
+        .filter(vis).map(el => ({ d: desc(el), type: el.type || el.tagName.toLowerCase(),
+            ph: el.placeholder || '', val: (el.value || el.textContent || '').trim().slice(0, 45) }));
+    const canvases = [...document.querySelectorAll('canvas')]
+        .map(c => ({ d: desc(c), w: c.width, h: c.height, vis: vis(c) }));
+    const imgs = [...document.querySelectorAll('img')].filter(vis)
+        .map(im => ({ d: desc(im), src: (im.src || '').slice(-45), w: im.naturalWidth, h: im.naturalHeight }));
+    const leaf = (needle) => [...document.querySelectorAll('*')]
+        .filter(el => vis(el) && el.children.length === 0 && (el.textContent || '').includes(needle))
+        .map(desc).slice(0, 8);
+    return {
+        url: location.href.slice(0, 55), title: document.title,
+        known: {
+            fileupload: !!document.querySelector('#fileupload'),
+            gallery: !!document.querySelector('.ccFromImageGalleryButton'),
+            placeholder: !!document.querySelector('.ccPlaceholderImageButton'),
+            submit: !!document.querySelector('#ccSubmitCoverButton'),
+        },
+        clickable: clickable.slice(0, 32),
+        inputs: inputs.slice(0, 25),
+        canvases: canvases,
+        imgCount: imgs.length, imgs: imgs.slice(0, 12),
+        titleTextEls: leaf(titre.slice(0, 15)),
+        authorTextEls: leaf(auteur),
+        bodyText: (document.body.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 500),
+    };
+}"""
+
+
+def _diag_cover_studio(cc_page, config, label):
+    """Journalise un instantané du DOM du studio Cover Creator (voir _JS_DIAG_CC).
+    Sert à cartographier template / zones texte / application image sans Inspector."""
+    titre = config.get("titre_livre", "")
+    auteur = config.get("auteur_nom", "")
+    try:
+        res = cc_page.evaluate(_JS_DIAG_CC, [titre, auteur])
+        log(f"DIAG CC STUDIO [{label}] : {json.dumps(res, ensure_ascii=False)}")
+    except Exception as e:
+        log(f"DIAG CC STUDIO [{label}] ÉCHEC du dump : {e}")
 
 
 def _drive_cover_creator(cc_page, config):
@@ -814,13 +967,33 @@ def _drive_cover_creator(cc_page, config):
     """
     log("Pilotage du Créateur de Couverture...")
 
-    # --- Pop-up d'intro "Comment utiliser le Créateur de Couverture" ---
-    intro = cc_page.get_by_role("link", name="Continuer")
+    # --- Entrée du studio (ROBUSTE aux chargements variables de la SPA) ---
+    # Selon la latence, soit le splash d'intro "Comment utiliser..." apparaît
+    # (#splashContinueButton — 0-size pour Playwright, clic JS requis, handler délégué),
+    # soit le studio va DIRECTEMENT au dialogue image (#fileupload). On attend donc que
+    # l'UN OU l'AUTRE soit présent (budget large : SPA canvas lourde), puis on ferme le
+    # splash s'il est là. (L'ancienne attente rigide sur le seul splash était flaky.)
     try:
-        intro.click(timeout=8000)
-        log("Pop-up d'intro fermée.")
+        cc_page.wait_for_function(
+            "() => !!(document.querySelector('#splashContinueButton') "
+            "|| document.querySelector('#fileupload'))",
+            timeout=TIMEOUT * 2,
+        )
     except TimeoutError:
-        log("Pas de pop-up d'intro (déjà masquée).")
+        # Filet : ni splash ni dialogue image -> écran inattendu (ex. reprise d'un
+        # design en cours sur un brouillon déjà utilisé). On dumpe pour diagnostic.
+        _diag_cover_studio(cc_page, config, "entrée studio (ni splash ni fileupload)")
+        raise
+    if cc_page.locator("#splashContinueButton").count() > 0:
+        cc_page.evaluate(
+            "() => { const b = document.querySelector('#splashContinueButton'); if (b) b.click(); }"
+        )
+        cc_page.wait_for_timeout(2500)
+        log("Splash d'intro fermé (#splashContinueButton).")
+    else:
+        log("Pas de splash d'intro (studio direct sur le dialogue image).")
+
+    cc_page.wait_for_timeout(1000)
 
     # --- Étape 1a : source de l'image (dialogue "Obtenir les images") ---
     # Sélecteurs STABLES vérifiés en live :
@@ -836,8 +1009,11 @@ def _drive_cover_creator(cc_page, config):
         img_path = config.get("couverture_image_path")
         if not img_path or not os.path.exists(os.path.abspath(img_path)):
             raise Exception("couverture_image='ordinateur' mais couverture_image_path introuvable.")
+        # #fileupload est un input file CACHÉ (dispo une fois le splash fermé) :
+        # attendre 'attached' puis pousser le fichier ; laisser le studio traiter/rendre.
+        cc_page.wait_for_selector("#fileupload", state="attached", timeout=TIMEOUT)
         cc_page.set_input_files("#fileupload", os.path.abspath(img_path))
-        cc_page.wait_for_timeout(2000)
+        cc_page.wait_for_timeout(4000)
 
     elif source == "galerie":
         cc_page.locator(".ccFromImageGalleryButton").first.click(timeout=TIMEOUT)
@@ -855,30 +1031,73 @@ def _drive_cover_creator(cc_page, config):
         raise Exception(f"couverture_image inconnu : {source!r} (galerie|ordinateur|ignorer)")
 
     # =====================================================================
-    # >>> /!\ BLOCAGE CONNU — APPLICATION DE L'IMAGE (à résoudre en live)
-    # Vérifié en live : un simple .click() sur une vignette `img.userImage` NE
-    # L'APPLIQUE PAS à la couverture. KDP refuse ensuite la soumission :
-    #   « Nous ne sommes pas en mesure de soumettre votre couverture avec
-    #     l'image par défaut. »
-    # => Une VRAIE image est OBLIGATOIRE : l'option "Ignorer cette étape"
-    #    (image par défaut) ne produit donc PAS une couverture soumissible.
-    # => L'application d'une image galerie nécessite probablement un
-    #    glisser-déposer sur le canvas ou un double-clic (éditeur graphique).
-    #    Interaction non résolue de façon fiable.
-    #
-    # RECOMMANDATION FORTE : pour un pipeline robuste, utiliser plutôt
-    #   config["couverture_path"] (upload d'une image prête) — voir
-    #   use_cover_creator mode 1, entièrement fiable.
+    # APPLICATION IMAGE : pour la source "ordinateur", l'image uploadée est
+    # AUTO-APPLIQUÉE à tous les aperçus de templates (vérifié 2026-07-10 :
+    # img.userImage passe aux dimensions du fichier après l'upload). Pas de
+    # drag/double-clic nécessaire. (L'ancien "blocage" ne visait que la GALERIE.)
+    # On valide ensuite la création (étape 1 -> 2) via #ccSelectDesignButton.
     # =====================================================================
-    log(">>> PAUSE APPLICATION IMAGE : appliquer réellement l'image (drag/double-clic ?)")
-    cc_page.pause()
-
-    # --- Étape 3 : Aperçu puis soumission (sélecteurs STABLES confirmés) ---
-    # Bouton "Aperçu" (footer, distingué par texte) :
-    cc_page.get_by_text("Aperçu", exact=True).last.click(timeout=TIMEOUT)
     cc_page.wait_for_timeout(1500)
-    # Bouton final "Enregistrer et envoyer" -> redirige vers /content :
-    cc_page.locator("#ccSubmitCoverButton").click(timeout=TIMEOUT)
+
+    # (Optionnel) sélection d'un template de mise en page par index (vignettes
+    # img[src*='_med_']). Par défaut : template pré-sélectionné du studio.
+    tpl_index = config.get("couverture_template_index")
+    if tpl_index is not None:
+        cc_page.locator("img[src*='_med_']").nth(int(tpl_index)).click(timeout=TIMEOUT)
+        cc_page.wait_for_timeout(1000)
+        log(f"Template sélectionné (index {tpl_index}).")
+
+    # Valider la création : bouton AUI "Choisir cette création" -> clic JS
+    # (Playwright click ne déclenche pas le handler, comme launch/splash).
+    cc_page.wait_for_selector("#ccSelectDesignButton", state="attached", timeout=TIMEOUT)
+    cc_page.evaluate(
+        "() => { const b = document.querySelector('#ccSelectDesignButton'); if (b) b.click(); }"
+    )
+    cc_page.wait_for_timeout(3000)
+    log("Création validée (#ccSelectDesignButton) -> étape 2 (mise en forme).")
+
+    # CARTOGRAPHIE étape 2 (édition texte titre/auteur). Arrêt propre après le dump.
+    # Étape 2 : le TITRE et l'AUTEUR sont AUTO-PLACÉS par KDP depuis les métadonnées
+    # (title/author passés dans l'URL de lancement) -> texte overlay déjà correct et
+    # éditable (div#ccTitle). Aucune saisie nécessaire (vérifié 2026-07-10).
+
+    # --- Étape 3 : Aperçu ---  bouton AUI -> clic JS (Playwright click inopérant).
+    clicked = cc_page.evaluate(
+        """() => {
+            const el = [...document.querySelectorAll('a, button')]
+                .find(x => x.textContent.trim() === 'Aperçu' && x.offsetParent !== null);
+            if (el) { el.click(); return true; }
+            return false;
+        }"""
+    )
+    if not clicked:
+        raise Exception("Bouton 'Aperçu' introuvable dans le studio (étape 2->3).")
+    cc_page.wait_for_timeout(2500)
+    _diag_cover_studio(cc_page, config, "étape 3 (aperçu, avant soumission)")
+
+    # Garde-fou : la soumission écrit la couverture sur le brouillon. On ne la
+    # déclenche que si explicitement autorisé (le temps de valider le flux complet).
+    if not os.environ.get("KDP_SUBMIT_COVER"):
+        raise Exception(
+            "DIAGNOSTIC COVER STUDIO (étape 3 aperçu) — flux mappé jusqu'à la soumission. "
+            "Soumission NON déclenchée (garde-fou). Relancer avec KDP_SUBMIT_COVER=1 pour "
+            "exécuter la soumission réelle (#ccSubmitCoverButton) et vérifier le retour /content."
+        )
+
+    # Laisser l'aperçu finir de se rendre (spinner #loadingIcon) avant de soumettre.
+    try:
+        cc_page.wait_for_selector("#loadingIcon", state="hidden", timeout=TIMEOUT)
+    except TimeoutError:
+        pass
+    cc_page.wait_for_timeout(1000)
+
+    # Soumission finale "Enregistrer et envoyer" -> redirige vers /content.
+    submitted = cc_page.evaluate(
+        "() => { const b = document.querySelector('#ccSubmitCoverButton'); if (b) { b.click(); return true; } return false; }"
+    )
+    if not submitted:
+        raise Exception("Bouton de soumission #ccSubmitCoverButton introuvable (étape 3).")
+    log("Couverture soumise (#ccSubmitCoverButton) — redirection /content attendue.")
 
 
 # ---------------------------------------------------------------------------

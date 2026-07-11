@@ -174,6 +174,27 @@ def _est_ancien_format() -> bool:
         return False
 
 
+def forcer_marketplace_fr(page):
+    """Force le 'Site de vente principal' (home_marketplace) sur FR AVANT d'ouvrir
+    la modale des rubriques, pour que KDP serve l'arbre des browse-nodes du schéma
+    Amazon.fr (nodeId 891xxx) et non le défaut US (156xxx).
+
+    /!\\ À rappeler après CHAQUE page.goto : un rechargement remet le marketplace
+    sur US par défaut, ce qui produirait un tree.json HYBRIDE US/FR.
+    La modale doit être FERMÉE au moment de l'appel : changer le marketplace efface
+    toute rubrique déjà sélectionnée côté formulaire (vérifié en live 2026-07-10)."""
+    sel = 'select[name="data[digital][home_marketplace]"]'
+    try:
+        page.wait_for_selector(sel, timeout=NODE_CONTENT_TIMEOUT * 2)
+        if page.locator(sel).input_value() != "FR":
+            page.select_option(sel, value="FR")
+            # Laisse React recharger l'arbre des rubriques pour le nouveau marketplace.
+            page.wait_for_timeout(2000)
+        log("home_marketplace forcé sur FR (arbre browse-nodes Amazon.fr / 891xxx).")
+    except Exception as e:
+        log(f"⚠️ Échec du forçage home_marketplace=FR : {e} — arbre potentiellement US !")
+
+
 def main():
     rubriques_niveau0 = []  # capturé au niveau 0 pour le contrôle qualité final
 
@@ -230,6 +251,9 @@ def main():
         adult_radio.wait_for(state="attached")
         adult_radio.click(force=True)
 
+        # AMENDEMENT A : marketplace FR AVANT d'ouvrir la modale (schéma 891xxx).
+        forcer_marketplace_fr(page)
+
         def verifier_et_ouvrir_modal():
             if not page.locator('.a-popover-modal').first.is_visible():
                 log("🔄 [MODAL] Réouverture de la fenêtre des rubriques...")
@@ -274,6 +298,9 @@ def main():
             adult = page.locator('input[name="data[is_adult_content]-radio"][value="false"]')
             adult.wait_for(state="attached")
             adult.click(force=True)
+            # AMENDEMENT A : un goto remet le marketplace sur US -> re-forcer FR
+            # AVANT de rouvrir la modale, sinon la suite du parcours repart en 156xxx.
+            forcer_marketplace_fr(page)
             verifier_et_ouvrir_modal()
 
         verifier_et_ouvrir_modal()
