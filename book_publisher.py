@@ -758,6 +758,58 @@ def upload_content(page, config):
         raise Exception(f"Erreur étape 2 (upload manuscrit) : {str(e)}")
 
 
+def _click_ai_toggle(page, oui):
+    """
+    Coche le toggle parent « Avez-vous utilisé des outils exploitant l'IA... ? » (Oui/Non).
+
+    /!\\ Ce n'est PAS un <input type=radio> : ce sont deux lignes d'accordéon AUI
+    (vérifié en live 2026-07-12) :
+        <a data-action="a-accordion" class="a-accordion-row a-declarative" href="#">
+            <i class="a-icon a-accordion-radio ..."></i><h5>Oui</h5></a>
+        <a ... class="a-accordion-row a-declarative"><i ...></i><h5>Non</h5></a>
+    scellées dans le .a-accordion qui contient aussi les 3 <select> IA.
+
+    Cliquer « Oui » DÉPLIE le panneau (les 3 selects, jusque-là dans un accordéon
+    replié en display:none, deviennent visibles) ET pose les inputs cachés
+    data[generative_ai_questionnaire][user_affirmed]=true + [contains_ai_content]=YES.
+    « Non » pose [contains_ai_content]=NO. Sans ce clic, les valeurs des selects ne
+    sont pas prises en compte par KDP (affirmation obligatoire, cf. input caché
+    data[view][require_generative_ai_questionnaire_affirmation]=true).
+    """
+    label = "Oui" if oui else "Non"
+    # Périmètre : le .a-accordion qui contient le 1er <select> IA (évite de matcher
+    # un autre accordéon Oui/Non de la page).
+    ai_acc = page.locator(
+        "div.a-accordion", has=page.locator("#generative-ai-questionnaire-text")
+    )
+    row = ai_acc.locator(
+        "a.a-accordion-row", has=page.locator("h5", has_text=label)
+    ).first
+    row.wait_for(state="visible", timeout=TIMEOUT)
+    row.scroll_into_view_if_needed()
+    row.click()
+
+    # Confirme que KDP a enregistré l'affirmation (input caché posé par le clic) —
+    # indépendant de la visibilité géométrique du panneau.
+    expected = "YES" if oui else "NO"
+    try:
+        page.wait_for_function(
+            """(exp) => {
+                const a = document.querySelector('input[name="data[generative_ai_questionnaire][user_affirmed]"]');
+                const c = document.querySelector('input[name="data[generative_ai_questionnaire][contains_ai_content]"]');
+                return !!(a && a.value === 'true' && c && c.value === exp);
+            }""",
+            arg=expected,
+            timeout=TIMEOUT,
+        )
+    except TimeoutError:
+        raise Exception(
+            f"Toggle IA « {label} » : affirmation non enregistrée après le clic "
+            "(input caché data[generative_ai_questionnaire][...] non posé)."
+        )
+    log(f"Toggle IA coché : « {label} » (contains_ai_content={expected}).")
+
+
 def _fill_ai_questionnaire(page, config):
     """
     Renseigne la déclaration de contenu généré par IA (obligatoire sur /content).
@@ -769,6 +821,12 @@ def _fill_ai_questionnaire(page, config):
         "images":      "NONE|FEW_AND_MINIMAL|FEW_AND_EXTENSIVE|MANY_AND_MINIMAL|MANY_AND_EXTENSIVE",
         "traductions": "NONE|PARTIAL_AND_MINIMAL|PARTIAL_AND_EXTENSIVE|ENTIRE_AND_MINIMAL|ENTIRE_AND_EXTENSIVE"
       }
+
+    Flux (ordre IMPÉRATIF) :
+      1. Toggle parent Oui/Non (_click_ai_toggle). « Non » si les 3 réponses valent
+         NONE (aucun contenu IA) -> on s'arrête là, KDP n'exige pas les selects.
+         Sinon « Oui », qui DÉPLIE le panneau contenant les 3 selects.
+      2. Poser les 3 <select> (uniquement dans le cas « Oui »).
     """
     ia = config.get("contenu_ia")
     if not ia or not all(k in ia for k in ("texte", "images", "traductions")):
@@ -777,7 +835,17 @@ def _fill_ai_questionnaire(page, config):
             "avec les clés 'texte', 'images', 'traductions' (déclaration obligatoire KDP)."
         )
 
-    # Les 3 <select> IA sont des dropdowns AUI NATIFS CACHÉS (tabindex=-1,
+    # --- 1) Toggle parent Oui/Non ---
+    # « Non » seulement si AUCUN contenu IA n'est déclaré (les 3 valent NONE) ;
+    # dans ce cas les 3 selects ne sont pas requis.
+    aucun_ia = all(ia.get(k) == "NONE" for k in ("texte", "images", "traductions"))
+    if aucun_ia:
+        _click_ai_toggle(page, oui=False)
+        log("Déclaration IA : aucun contenu IA (3x NONE) -> toggle « Non », selects non requis.")
+        return
+    _click_ai_toggle(page, oui=True)  # déplie le panneau des 3 selects
+
+    # --- 2) Les 3 <select> IA sont des dropdowns AUI NATIFS CACHÉS (tabindex=-1,
     # a-native-dropdown) : page.select_option échoue ("element is not visible").
     # On pose la valeur en JS + dispatch 'change' (même contournement que la langue
     # à l'étape 1). Validation stricte de l'option (déclaration légale).
