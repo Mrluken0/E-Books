@@ -1218,6 +1218,47 @@ def _drive_cover_creator(cc_page, config):
 
 
 # ---------------------------------------------------------------------------
+# FIN ÉTAPE 2 — ENREGISTRER ET CONTINUER (/content -> /pricing)
+# ---------------------------------------------------------------------------
+def save_content_and_continue(page):
+    """
+    Fin de l'étape 2 (page /content) : clique « Enregistrer et continuer » pour
+    passer à l'étape 3 (/pricing), APRÈS upload_content() + use_cover_creator().
+
+    Sélecteur vérifié en live (KDP fr_FR, ebook) :
+      Bouton continuer : #save-and-continue  (identique à l'étape 1 /details)
+
+    /!\\ Le questionnaire IA replie/déplie un accordéon AUI sur cette page
+    (cf. _click_ai_toggle). Par sécurité on attend le bouton 'attached' avant de
+    cliquer — même logique que l'input manuscrit caché — plutôt que de supposer
+    qu'il est toujours actionnable après manipulation de l'accordéon.
+
+    KDP peut afficher un bandeau orange NON BLOQUANT « Table des matières
+    manquante » sur cette page — confirmé non bloquant par la doc Amazon : il
+    n'empêche pas le passage à /pricing et on l'ignore volontairement. La
+    transition est confirmée en attendant l'URL /pricing (pas en se fiant à
+    l'absence du bandeau) ; aucune modale de confirmation n'est attendue.
+    """
+    log("Étape 2 : « Enregistrer et continuer » -> /pricing...")
+    try:
+        page.wait_for_selector("#save-and-continue", state="attached", timeout=TIMEOUT)
+        page.click("#save-and-continue")
+
+        # Confirmation robuste du passage à l'étape 3 : l'URL doit contenir /pricing.
+        page.wait_for_url("**/pricing**", timeout=TIMEOUT)
+        log("Passage à l'étape 3 (/pricing) confirmé.")
+
+    except TimeoutError as e:
+        raise Exception(
+            "Timeout étape 2 (« Enregistrer et continuer ») — /pricing non atteint. "
+            "Vérifier un blocage BLOQUANT (erreur de validation KDP) distinct du "
+            f"bandeau « Table des matières manquante » qui, lui, est non bloquant : {str(e)}"
+        )
+    except Exception as e:
+        raise Exception(f"Erreur étape 2 (« Enregistrer et continuer ») : {str(e)}")
+
+
+# ---------------------------------------------------------------------------
 # ÉTAPE 3 — PRIX
 # ---------------------------------------------------------------------------
 def set_pricing(page, config):
@@ -1249,16 +1290,53 @@ def set_pricing(page, config):
             if select_check.is_checked():
                 select_check.uncheck()
 
-        # --- Marketplace principal = FR (rend le prix FR éditable) ---
-        page.select_option('select[name="data[digital][home_marketplace]"]', value="FR")
-        page.wait_for_timeout(2000)
+        # --- Marketplace principal ---
+        # /!\\ Vérifié en live : sur /pricing ce <select> est DÉSACTIVÉ (disabled).
+        # Le site de vente principal se choisit à l'étape /details (fill_book_details
+        # le met déjà sur FR) et n'est ici qu'un rappel en lecture seule — KDP l'écrit
+        # explicitement (« Pour modifier votre site de vente principal, revenez à
+        # l'onglet Détails »). On NE tente donc PAS de le changer (select_option
+        # échouerait sur un élément disabled). Comme il vaut déjà FR, le prix FR est
+        # d'emblée éditable ; on confirme juste la valeur, sinon FR resterait en
+        # lecture seule (price_readonly) et le fill échouerait plus bas.
+        home_value = page.input_value('select[name="data[digital][home_marketplace]"]')
+        if home_value != "FR":
+            raise Exception(
+                f"Site de vente principal = {home_value!r} (attendu 'FR') sur /pricing, "
+                "et le champ y est en lecture seule. À corriger à l'étape /details."
+            )
 
         # --- Taux de redevance (défaut 70 %) ---
+        # /!\\ Vérifié en live : radio AUI « fancy ». Le <input> réel est recouvert
+        # par <i class="a-icon a-icon-radio"> qui intercepte le clic -> page.check()
+        # échoue (pointer events interceptés). On clique le <label> parent (qui, par
+        # comportement natif, coche l'input), comme _click_ai_toggle clique la ligne
+        # d'accordéon, puis on confirme l'état réel de l'input (indépendant du rendu).
         royalty = "35_PERCENT" if str(config.get("royalty", "70")) == "35" else "70_PERCENT"
-        page.check(f'input[name="data[digital][royalty_rate]-radio"][value="{royalty}"]')
+        page.locator(
+            f'div.a-radio:has(input[name="data[digital][royalty_rate]-radio"]'
+            f'[value="{royalty}"]) label'
+        ).click()
+        page.wait_for_function(
+            """(val) => {
+                const i = document.querySelector(
+                    'input[name="data[digital][royalty_rate]-radio"]:checked');
+                return !!(i && i.value === val);
+            }""",
+            arg=royalty,
+            timeout=TIMEOUT,
+        )
 
         # --- Prix FR (EUR TTC) ; KDP recalcule les autres marketplaces ---
-        page.fill('input[name="data[digital][channels][amazon][FR][price_vat_inclusive]"]', prix)
+        # /!\\ Vérifié en live : sur amazon.fr, KDP valide le prix en locale FR.
+        # Un point décimal ("7.99") est REJETÉ (« Utilisez un format tarifaire
+        # correspondant à 0,00 ») et, tant que le format est invalide, la redevance
+        # nette n'est PAS calculée (colonnes Taux/Redevance = « – »). On saisit donc
+        # avec une VIRGULE. (Prix < 1000 EUR : pas de séparateur de milliers à gérer.)
+        prix_fr = prix.replace(".", ",")
+        page.fill(
+            'input[name="data[digital][channels][amazon][FR][price_vat_inclusive]"]', prix_fr
+        )
         page.wait_for_timeout(2000)
 
     except TimeoutError as e:
@@ -1414,7 +1492,7 @@ def main():
             fill_book_details(page, config)       # /details -> clique Continuer
             upload_content(page, config)          # /content : IA, DRM, manuscrit
             use_cover_creator(context, page, config)  # /content : couverture
-            page.click("#save-and-continue")      # /content -> /pricing
+            save_content_and_continue(page)       # /content -> /pricing
             set_pricing(page, config)
             asin = submit_and_get_asin(page, config)
 
