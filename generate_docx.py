@@ -30,6 +30,66 @@ except ImportError:
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
 
+def _bookmark_name(num, sub_index=None):
+    """Nom de signet déterministe, dérivable de num/index avant l'écriture XML.
+
+    Word limite les noms à 40 caractères alphanumériques + underscore, avec un
+    premier caractère alphabétique. Les noms produits ici ("chap_1",
+    "chap_3_sub_2") respectent déjà ces contraintes ; on sanitise par sécurité.
+    """
+    base = f"chap_{num}" if sub_index is None else f"chap_{num}_sub_{sub_index}"
+    safe = re.sub(r'[^A-Za-z0-9_]', '_', base)
+    if not safe[:1].isalpha():
+        safe = "b_" + safe
+    return safe[:40]
+
+def add_bookmark(paragraph, bookmark_name, bookmark_id):
+    """Encadre le contenu d'un paragraphe d'un <w:bookmarkStart>/<w:bookmarkEnd>.
+
+    Le signet devient une ancre navigable ciblable par un hyperlien interne.
+    """
+    p = paragraph._p
+    start = OxmlElement('w:bookmarkStart')
+    start.set(qn('w:id'), str(bookmark_id))
+    start.set(qn('w:name'), bookmark_name)
+    end = OxmlElement('w:bookmarkEnd')
+    end.set(qn('w:id'), str(bookmark_id))
+    # bookmarkStart juste après pPr (ou en tête), bookmarkEnd à la fin :
+    # encadre les runs du titre.
+    pPr = p.find(qn('w:pPr'))
+    if pPr is not None:
+        pPr.addnext(start)
+    else:
+        p.insert(0, start)
+    p.append(end)
+
+def add_internal_hyperlink(paragraph, text, anchor):
+    """Ajoute un run cliquable pointant vers un signet interne (w:anchor).
+
+    Le run est stylé (bleu lien Word + soulignement) pour ressembler à un lien
+    natif.
+    """
+    hyperlink = OxmlElement('w:hyperlink')
+    hyperlink.set(qn('w:anchor'), anchor)
+
+    run = OxmlElement('w:r')
+    rPr = OxmlElement('w:rPr')
+    color = OxmlElement('w:color')
+    color.set(qn('w:val'), '0563C1')  # bleu hyperlien standard Word
+    rPr.append(color)
+    u = OxmlElement('w:u')
+    u.set(qn('w:val'), 'single')
+    rPr.append(u)
+    run.append(rPr)
+
+    t = OxmlElement('w:t')
+    t.set(qn('xml:space'), 'preserve')
+    t.text = text
+    run.append(t)
+
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
 def ensure_toc_styles(doc):
     """Crée les styles 'TOC 1' et 'TOC 2' s'ils n'existent pas (basedOn Normal, indent gauche progressif)."""
     from docx.enum.style import WD_STYLE_TYPE
@@ -53,11 +113,13 @@ def generate_toc_entries(doc, chapitres_data):
     for chap in chapitres_data:
         num = chap.get("numero", 1)
         c_titre = chap.get("titre", "").strip()
-        doc.add_paragraph(f"Chapitre {num} — {c_titre}", style="TOC 1")
-        for sub in chap.get("sous_chapitres", []):
+        p_chap = doc.add_paragraph(style="TOC 1")
+        add_internal_hyperlink(p_chap, f"Chapitre {num} — {c_titre}", _bookmark_name(num))
+        for idx, sub in enumerate(chap.get("sous_chapitres", [])):
             s_titre = sub.get("titre", "").strip()
             if s_titre:
-                doc.add_paragraph(s_titre, style="TOC 2")
+                p_sub = doc.add_paragraph(style="TOC 2")
+                add_internal_hyperlink(p_sub, s_titre, _bookmark_name(num, idx))
 
 def configure_styles(doc):
     """Configure la police Georgia et les tailles demandées sur les styles de base."""
@@ -270,24 +332,29 @@ def main():
         doc.add_page_break()
 
         # Insertion des chapitres
+        bookmark_id = 0
         for chap in chapitres_data:
             num = chap.get("numero", 1)
             c_titre = chap.get("titre", "").strip()
-            
-            # Titre du Chapitre
-            doc.add_heading(f"Chapitre {num} — {c_titre}", level=1)
-            
+
+            # Titre du Chapitre (avec signet navigable, ciblé par la TOC)
+            h_chap = doc.add_heading(f"Chapitre {num} — {c_titre}", level=1)
+            add_bookmark(h_chap, _bookmark_name(num), bookmark_id)
+            bookmark_id += 1
+
             # Introduction
             if chap.get("introduction"):
                 add_paragraph_with_markdown(doc, chap["introduction"], style='Normal')
 
             # Sous-chapitres
-            for sub in chap.get("sous_chapitres", []):
+            for idx, sub in enumerate(chap.get("sous_chapitres", [])):
                 s_titre = sub.get("titre", "").strip()
                 s_contenu = sub.get("contenu", "")
 
                 if s_titre:
-                    doc.add_heading(s_titre, level=2)
+                    h_sub = doc.add_heading(s_titre, level=2)
+                    add_bookmark(h_sub, _bookmark_name(num, idx), bookmark_id)
+                    bookmark_id += 1
                 if s_contenu:
                     add_paragraph_with_markdown(doc, s_contenu, style='Normal')
 
