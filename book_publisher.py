@@ -106,8 +106,6 @@ def ensure_logged_in(page, config):
     email = config["email"]
     mdp = config["mot_de_passe"]
     
-    page.pause()
-
     page.fill("#ap_email", email)
     page.click("#continue")
     page.fill("#ap_password", mdp)
@@ -172,7 +170,6 @@ def fill_book_details(page, config):
         page.fill("#data-primary-author-first-name", prenom)
         page.fill("#data-primary-author-last-name", nom)
         
-        page.pause()  # Pause pour vérifier le remplissage avant de continuer
         
         # --- Description (CKEditor, voir helper dédié) ---
         _fill_description(page, config["description"])
@@ -202,7 +199,6 @@ def fill_book_details(page, config):
         )
         page.wait_for_timeout(1500)
 
-        #page.pause()
 
         # --- Option de publication (Paraître maintenant / Précommande) ---
         _set_publish_option(page, config.get("option_publication", OPTION_PUBLICATION_KDP))
@@ -264,7 +260,6 @@ def _set_publish_option(page, option_pub):
         log(">>> PAUSE PRÉCOMMANDE : renseigner la date de parution "
             "(#data-preorder-release-date-input) et vérifier l'éligibilité du "
             "compte. Volet non encore automatisé — m'envoyer les infos si besoin.")
-        page.pause()
         # TODO(précommande) : remplir la date de parution puis valider.
 
 
@@ -393,7 +388,6 @@ def select_categories(page, config):
         #   PowerShell : $env:KDP_PAUSE_CASCADE=1 ; python book_publisher.py --config ...
         if os.environ.get("KDP_PAUSE_CASCADE"):
             log("KDP_PAUSE_CASCADE actif — pause juste avant la cascade rubrique.")
-            page.pause()
         _remplir_rubrique_cascade(page, cat["chemin_node_ids"], cat.get("libelle"))
         _check_classement_by_node_id(page, cat["classement"], cat.get("libelle"))
 
@@ -704,6 +698,38 @@ def _confirm_categories_modal(page):
 # ---------------------------------------------------------------------------
 # ÉTAPE 2 — UPLOAD DU MANUSCRIT
 # ---------------------------------------------------------------------------
+def _wait_manuscript_processing_done(page, timeout=180000):
+    """
+    Attend la FIN de la conversion serveur du manuscrit (pas seulement l'upload).
+
+    La boîte de succès #data-assets-interior-file-upload-success reste affichée
+    pendant toute la conversion ; seul son sous-texte (.a-alert-content) change :
+      - en cours : « … Traitement du fichier en cours… »
+      - terminé  : « … Le traitement des fichiers est terminé. Vérification du
+                    manuscrit terminée. »  (vérifié en live 2026-07-13)
+    On attend ce basculement (présence de « terminé », absence de « en cours »)
+    comme signal déterministe, au lieu d'un délai fixe : c'est ce qui évite la
+    modale « Préparation des fichiers » au moment d'« Enregistrer et continuer ».
+    """
+    try:
+        page.wait_for_function(
+            """() => {
+                const box = document.querySelector('#data-assets-interior-file-upload-success');
+                if (!box || box.offsetParent === null) return false;
+                const c = box.querySelector('.a-alert-content') || box;
+                const t = (c.innerText || '').toLowerCase();
+                return /termin/.test(t) && !/en cours/.test(t);
+            }""",
+            timeout=timeout,
+        )
+        log("Conversion du manuscrit terminée (message KDP confirmé).")
+    except TimeoutError:
+        raise Exception(
+            "Timeout : fin de conversion du manuscrit non confirmée "
+            "(message « traitement terminé / vérification terminée » non apparu)."
+        )
+
+
 def upload_content(page, config):
     """
     Étape 2 (page /content) : déclaration contenu IA, DRM, upload du manuscrit.
@@ -745,6 +771,12 @@ def upload_content(page, config):
             "#data-assets-interior-file-upload-success", state="visible", timeout=180000
         )
         log("Manuscrit téléchargé avec succès.")
+
+        # L'upload (« chargement effectué ») précède la CONVERSION serveur. On
+        # attend le message de fin de conversion, sinon « Enregistrer et
+        # continuer » ouvre la modale « Préparation des fichiers » qui retarde
+        # /pricing (cf. save_content_and_continue). Signal déterministe.
+        _wait_manuscript_processing_done(page)
 
     except FileNotFoundError:
         raise
@@ -789,25 +821,70 @@ def _click_ai_toggle(page, oui):
     row.scroll_into_view_if_needed()
     row.click()
 
-    # Confirme que KDP a enregistré l'affirmation (input caché posé par le clic) —
+    # Confirme que KDP a basculé l'accordéon (input caché posé par le clic) —
     # indépendant de la visibilité géométrique du panneau.
+    #
+    # /!\\ MAJ KDP (vérifié en live 2026-07) : l'ancien input caché
+    # data[generative_ai_questionnaire][user_affirmed] N'EXISTE PLUS. Le clic
+    # Oui/Non ne pose désormais QUE contains_ai_content=YES/NO. On valide donc
+    # sur ce seul champ (exiger user_affirmed provoquait un timeout systématique).
     expected = "YES" if oui else "NO"
     try:
         page.wait_for_function(
             """(exp) => {
-                const a = document.querySelector('input[name="data[generative_ai_questionnaire][user_affirmed]"]');
                 const c = document.querySelector('input[name="data[generative_ai_questionnaire][contains_ai_content]"]');
-                return !!(a && a.value === 'true' && c && c.value === exp);
+                return !!(c && c.value === exp);
             }""",
             arg=expected,
             timeout=TIMEOUT,
         )
     except TimeoutError:
         raise Exception(
-            f"Toggle IA « {label} » : affirmation non enregistrée après le clic "
-            "(input caché data[generative_ai_questionnaire][...] non posé)."
+            f"Toggle IA « {label} » : contains_ai_content non posé à '{expected}' "
+            "après le clic (accordéon IA non basculé)."
         )
     log(f"Toggle IA coché : « {label} » (contains_ai_content={expected}).")
+
+
+def _fill_ai_tools(page, dom_cat, tools):
+    """
+    Renseigne les zones « Quels outils avez-vous utilisés pour créer les {cat}
+    générés par l'IA ? » d'une catégorie (ajout KDP 2026-07).
+
+    Dès qu'une catégorie (texte/images/traductions) vaut ≠ NONE, KDP affiche
+    3 champs texte (placeholder « Par exemple ChatGPT » / « DALL-E »),
+    OBLIGATOIRES. Convention (validée avec l'auteur) : UN nom d'IA par zone.
+    Ces champs (a-input-text, sans name/id) sont ciblés par leur aria-labelledby
+    stable : generative-ai-questionnaire-{dom_cat}-tools-prompt.
+    Ils alimentent la déclaration ; KDP sérialise les zones visibles à la
+    soumission (le champ caché agrégé [tools] disparaît une fois saisi), donc on
+    valide via la valeur des zones, pas via un champ caché.
+
+    dom_cat ∈ {"text", "images", "translations"} (nom DOM, pas la clé config FR).
+    tools : liste de noms d'IA, un par zone (KDP en expose 3 max).
+    """
+    sel = f'input[aria-labelledby="generative-ai-questionnaire-{dom_cat}-tools-prompt"]'
+    boxes = page.locator(sel)
+    boxes.first.wait_for(state="visible", timeout=TIMEOUT)
+    n = boxes.count()
+    if len(tools) > n:
+        raise Exception(
+            f"Déclaration IA outils '{dom_cat}' : {len(tools)} outils fournis mais "
+            f"seulement {n} zones disponibles (un outil par zone)."
+        )
+    for i, name in enumerate(tools):
+        b = boxes.nth(i)
+        b.scroll_into_view_if_needed()
+        b.fill(str(name).strip())
+    # Confirme la saisie (déclaration légale) : relit la valeur des zones remplies.
+    got = [boxes.nth(i).input_value().strip() for i in range(len(tools))]
+    exp = [str(t).strip() for t in tools]
+    if got != exp:
+        raise Exception(
+            f"Déclaration IA outils '{dom_cat}' : saisie non confirmée "
+            f"(attendu {exp}, lu {got})."
+        )
+    log(f"Outils IA '{dom_cat}' : {exp}")
 
 
 def _fill_ai_questionnaire(page, config):
@@ -819,14 +896,21 @@ def _fill_ai_questionnaire(page, config):
       {
         "texte":       "NONE|PARTIAL_AND_MINIMAL|PARTIAL_AND_EXTENSIVE|ENTIRE_AND_MINIMAL|ENTIRE_AND_EXTENSIVE",
         "images":      "NONE|FEW_AND_MINIMAL|FEW_AND_EXTENSIVE|MANY_AND_MINIMAL|MANY_AND_EXTENSIVE",
-        "traductions": "NONE|PARTIAL_AND_MINIMAL|PARTIAL_AND_EXTENSIVE|ENTIRE_AND_MINIMAL|ENTIRE_AND_EXTENSIVE"
+        "traductions": "NONE|PARTIAL_AND_MINIMAL|PARTIAL_AND_EXTENSIVE|ENTIRE_AND_MINIMAL|ENTIRE_AND_EXTENSIVE",
+
+        # Ajout KDP 2026-07 : dès qu'une catégorie ≠ NONE, KDP EXIGE de nommer
+        # les outils IA utilisés (un nom par zone, 3 zones max par catégorie).
+        "outils_texte":       ["Claude", "Gemini"],   # requis si texte ≠ NONE
+        "outils_images":      ["Claude", "Gemini"],   # requis si images ≠ NONE
+        "outils_traductions": ["..."]                 # requis si traductions ≠ NONE
       }
 
     Flux (ordre IMPÉRATIF) :
       1. Toggle parent Oui/Non (_click_ai_toggle). « Non » si les 3 réponses valent
          NONE (aucun contenu IA) -> on s'arrête là, KDP n'exige pas les selects.
          Sinon « Oui », qui DÉPLIE le panneau contenant les 3 selects.
-      2. Poser les 3 <select> (uniquement dans le cas « Oui »).
+      2. Poser les 3 <select> ET, pour chaque catégorie ≠ NONE, nommer les outils
+         IA (uniquement dans le cas « Oui »).
     """
     ia = config.get("contenu_ia")
     if not ia or not all(k in ia for k in ("texte", "images", "traductions")):
@@ -849,10 +933,10 @@ def _fill_ai_questionnaire(page, config):
     # a-native-dropdown) : page.select_option échoue ("element is not visible").
     # On pose la valeur en JS + dispatch 'change' (même contournement que la langue
     # à l'étape 1). Validation stricte de l'option (déclaration légale).
-    for sel_id, val in (
-        ("generative-ai-questionnaire-text", ia["texte"]),
-        ("generative-ai-questionnaire-images", ia["images"]),
-        ("generative-ai-questionnaire-translations", ia["traductions"]),
+    for sel_id, dom_cat, val, outils_key in (
+        ("generative-ai-questionnaire-text", "text", ia["texte"], "outils_texte"),
+        ("generative-ai-questionnaire-images", "images", ia["images"], "outils_images"),
+        ("generative-ai-questionnaire-translations", "translations", ia["traductions"], "outils_traductions"),
     ):
         # Le questionnaire IA (AUI natif caché) peut être monté APRÈS l'input
         # manuscrit -> attendre sa présence (attached, pas visible) avant de poser.
@@ -876,6 +960,17 @@ def _fill_ai_questionnaire(page, config):
                 f"({(res or {}).get('reason', 'no ret')}; options dispo="
                 f"{(res or {}).get('dispo')})."
             )
+
+        # Ajout KDP 2026-07 : catégorie ≠ NONE -> nommer les outils IA (obligatoire).
+        if val != "NONE":
+            outils = ia.get(outils_key)
+            if not outils:
+                raise Exception(
+                    f"Déclaration IA : '{outils_key}' manquant dans config['contenu_ia'] "
+                    f"alors que la catégorie vaut {val} (KDP exige de nommer les outils IA)."
+                )
+            _fill_ai_tools(page, dom_cat, outils)
+
     log(f"Déclaration IA : texte={ia['texte']}, images={ia['images']}, traductions={ia['traductions']}")
 
 
@@ -1220,6 +1315,45 @@ def _drive_cover_creator(cc_page, config):
 # ---------------------------------------------------------------------------
 # FIN ÉTAPE 2 — ENREGISTRER ET CONTINUER (/content -> /pricing)
 # ---------------------------------------------------------------------------
+def _affirm_questionnaires(page):
+    """
+    Coche les cases d'affirmation « …je confirme que mes réponses sont exactes »
+    qui apparaissent après tout (ré)upload de manuscrit/couverture (vérifié en
+    live 2026-07-13).
+
+    Quand un nouveau fichier est chargé, KDP réaffiche un encart orange par
+    questionnaire concerné (contenu IA + accessibilité) : « Il semblerait que
+    vous ayez chargé un nouveau manuscrit ou une nouvelle couverture… » avec une
+    case à cocher. Tant qu'elles ne sont pas cochées, « Enregistrer et continuer »
+    est REFUSÉ (bandeau rouge « corrigez toutes les erreurs… cochez la case »).
+
+    Ce ne sont PAS des <input type=checkbox> natifs mais des composants React
+    (`<div role="checkbox" aria-checked>` dans un `<label>`). On clique le
+    `<label>` (« En cliquant sur ce lien… ») ; cocher pose les inputs cachés
+    data[generative_ai_questionnaire][user_affirmed]=true et
+    data[accessibility][user_affirmed]=true. Idempotent : ne clique que les cases
+    non déjà cochées ; no-op si aucune n'est présente (aucun nouvel upload).
+    """
+    page.wait_for_timeout(300)  # laisser l'encart se rendre après l'upload
+    labels = page.get_by_text("je confirme que mes", exact=False)
+    n = labels.count()
+    checked = 0
+    for i in range(n):
+        lab = labels.nth(i)
+        box = lab.locator('[role="checkbox"]').first
+        try:
+            if box.get_attribute("aria-checked") == "true":
+                continue
+        except Exception:
+            pass
+        lab.scroll_into_view_if_needed()
+        lab.click()
+        checked += 1
+    if checked:
+        log(f"Affirmation(s) « réponses exactes » cochée(s) : {checked} "
+            "(re-confirmation exigée après (ré)upload de fichier).")
+
+
 def save_content_and_continue(page):
     """
     Fin de l'étape 2 (page /content) : clique « Enregistrer et continuer » pour
@@ -1241,11 +1375,23 @@ def save_content_and_continue(page):
     """
     log("Étape 2 : « Enregistrer et continuer » -> /pricing...")
     try:
+        # Après (ré)upload manuscrit/couverture, KDP exige de re-confirmer les
+        # questionnaires (IA + accessibilité) via des cases à cocher, sinon le
+        # « Enregistrer et continuer » est bloqué. On les coche d'abord.
+        _affirm_questionnaires(page)
+
         page.wait_for_selector("#save-and-continue", state="attached", timeout=TIMEOUT)
         page.click("#save-and-continue")
 
+        # /!\\ Quand le manuscrit/couverture viennent d'être (ré)uploadés, KDP peut
+        # ouvrir une modale « Préparation des fichiers » et ne naviguer vers
+        # /pricing qu'une fois la conversion terminée. La conversion du MANUSCRIT
+        # (l'élément lent, plusieurs minutes) est désormais attendue en amont dans
+        # upload_content via _wait_manuscript_processing_done ; il ne reste ici que
+        # la finalisation (rapide) de la couverture + la navigation. On garde donc
+        # un filet de sécurité modéré (pas les 30 s par défaut, mais loin des 180 s).
         # Confirmation robuste du passage à l'étape 3 : l'URL doit contenir /pricing.
-        page.wait_for_url("**/pricing**", timeout=TIMEOUT)
+        page.wait_for_url("**/pricing**", timeout=90000)
         log("Passage à l'étape 3 (/pricing) confirmé.")
 
     except TimeoutError as e:
