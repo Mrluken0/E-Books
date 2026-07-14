@@ -213,6 +213,7 @@ def fill_book_details(page, config):
             page.fill(f"#data-keywords-{i}", mot)
 
         # --- Enregistrer et continuer vers l'étape Contenu ---
+        page.pause()
         page.click("#save-and-continue")
 
     except TimeoutError as e:
@@ -1380,6 +1381,7 @@ def save_content_and_continue(page):
         # « Enregistrer et continuer » est bloqué. On les coche d'abord.
         _affirm_questionnaires(page)
 
+        page.pause()
         page.wait_for_selector("#save-and-continue", state="attached", timeout=TIMEOUT)
         page.click("#save-and-continue")
 
@@ -1518,6 +1520,7 @@ def submit_and_get_asin(page, config):
             )
 
         # Bouton "Publier votre ebook Kindle" (vérifié en live)
+        page.pause()
         page.click("#save-and-publish-announce")
         # Après clic, KDP redirige vers la Bibliothèque (Bookshelf).
         page.wait_for_load_state("networkidle", timeout=60000)
