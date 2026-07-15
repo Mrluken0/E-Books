@@ -213,7 +213,6 @@ def fill_book_details(page, config):
             page.fill(f"#data-keywords-{i}", mot)
 
         # --- Enregistrer et continuer vers l'étape Contenu ---
-        page.pause()
         page.click("#save-and-continue")
 
     except TimeoutError as e:
@@ -1381,7 +1380,6 @@ def save_content_and_continue(page):
         # « Enregistrer et continuer » est bloqué. On les coche d'abord.
         _affirm_questionnaires(page)
 
-        page.pause()
         page.wait_for_selector("#save-and-continue", state="attached", timeout=TIMEOUT)
         page.click("#save-and-continue")
 
@@ -1498,6 +1496,18 @@ def set_pricing(page, config):
 # ---------------------------------------------------------------------------
 # SOUMISSION + RÉCUPÉRATION ASIN
 # ---------------------------------------------------------------------------
+class PublicationBlocked(Exception):
+    """
+    Levée quand KDP refuse la publication après le clic sur 'Publier' en
+    affichant un bandeau d'erreur générique ('corrigez toutes les erreurs
+    signalées'), sans attribuer d'ASIN.
+
+    Distincte d'une Exception générique : elle signale un blocage KDP côté
+    contenu du livre (à investiguer manuellement), pas un plantage du script.
+    """
+    pass
+
+
 def submit_and_get_asin(page, config):
     """
     Soumet le livre puis récupère l'ASIN de façon robuste :
@@ -1520,10 +1530,28 @@ def submit_and_get_asin(page, config):
             )
 
         # Bouton "Publier votre ebook Kindle" (vérifié en live)
-        page.pause()
         page.click("#save-and-publish-announce")
-        # Après clic, KDP redirige vers la Bibliothèque (Bookshelf).
+        # Après clic : soit KDP redirige vers la Bibliothèque (Bookshelf, succès),
+        # soit il reste sur la page en affichant un bandeau d'erreur (blocage).
         page.wait_for_load_state("networkidle", timeout=60000)
+
+        # --- 0) Détection d'un blocage KDP (bandeau d'erreur générique) ---
+        # KDP peut refuser la publication et rester sur la page avec un bandeau
+        # ".a-alert-error" ("Pour continuer, corrigez toutes les erreurs
+        # signalées.") sans jamais attribuer d'ASIN. Sans ce garde-fou, l'absence
+        # d'ASIN était interprétée à tort comme un "PENDING" (faux succès) :
+        # cf. incident 14/07/2026. On doit remonter un échec FIABLE, pas un
+        # succès factice. Ce check tourne à chaque appel (donc pour chaque livre
+        # du run, la fonction étant appelée une fois par livre).
+        banner = _publication_error_banner(page)
+        if banner:
+            msg = (
+                "Publication rejetée par KDP — bandeau d'erreur générique affiché, "
+                "cause non identifiée automatiquement (à investiguer manuellement "
+                f"côté compte/livre KDP). Bandeau : \"{banner}\""
+            )
+            log(f"[ERREUR] {msg}")
+            raise PublicationBlocked(msg)
 
         # --- 1) Extraction via l'URL courante ---
         asin = _extract_asin_from_url(page.url)
@@ -1541,6 +1569,10 @@ def submit_and_get_asin(page, config):
         log("ASIN non disponible immédiatement — retour 'PENDING'.")
         return "PENDING"
 
+    except PublicationBlocked:
+        # Blocage KDP déjà logué et typé : on le laisse remonter tel quel,
+        # sans le maquiller en Exception générique.
+        raise
     except TimeoutError as e:
         raise Exception(f"Timeout étape finale (publication) — {str(e)}")
     except Exception as e:
@@ -1565,6 +1597,42 @@ def _publish_is_blocked(page):
             return /disabled/i.test(cls) || ariaSpan === 'true' || ariaBtn === 'true' || prop;
         }"""
     ))
+
+
+def _publication_error_banner(page):
+    """
+    Retourne le texte du bandeau d'erreur bloquant de KDP s'il est visible
+    après le clic sur 'Publier', sinon None.
+
+    KDP affiche un ".a-alert-error" générique ("Pour continuer, corrigez toutes
+    les erreurs signalées.") sans détailler le champ fautif dans le DOM. On se
+    contente de détecter ce bandeau (FR + variantes EN au cas où le compte est
+    en anglais) pour remonter un échec fiable au lieu d'un faux 'PENDING' ;
+    l'identification du champ fautif reste manuelle.
+    """
+    return page.evaluate(
+        r"""() => {
+            const PHRASES = [
+                'corrigez toutes les erreurs',
+                'corrigez les erreurs',
+                'fix all the errors',
+                'fix the errors',
+                'correct all the errors',
+                'correct the errors',
+            ];
+            const alerts = document.querySelectorAll('.a-alert-error:not(.a-hidden)');
+            for (const el of alerts) {
+                // Ignore les bandeaux hors layout (display:none, non rendus).
+                if (!el.offsetParent && el.offsetHeight === 0) continue;
+                const txt = (el.innerText || el.textContent || '').trim();
+                const low = txt.toLowerCase();
+                if (PHRASES.some(p => low.includes(p))) {
+                    return txt.replace(/\s+/g, ' ').slice(0, 300);
+                }
+            }
+            return null;
+        }"""
+    )
 
 
 def _extract_asin_from_url(url):
@@ -1648,6 +1716,12 @@ def main():
             context.close()
 
         output = {"status": "success", "asin": asin}
+
+    except PublicationBlocked as e:
+        # Blocage KDP identifié (bandeau d'erreur générique) : statut distinct
+        # de "error" pour que n8n ne confonde pas ça avec un plantage script et
+        # NE retente PAS une publication tant que la cause n'est pas résolue.
+        output = {"status": "blocked", "asin": None, "error": str(e)}
 
     except Exception as e:
         log(f"ERREUR CRITIQUE : {str(e)}")
