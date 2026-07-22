@@ -121,6 +121,73 @@ def generate_toc_entries(doc, chapitres_data):
                 p_sub = doc.add_paragraph(style="TOC 2")
                 add_internal_hyperlink(p_sub, s_titre, _bookmark_name(num, idx))
 
+# ══════════════════════════════════════════════════════════════════════════
+# [TEST-TOC-NATIVE-FIELD] — DÉBUT — bloc de test ISOLÉ et RÉVERSIBLE
+#
+# Ajoute un VRAI champ TOC Word natif { TOC \o "1-3" \h \z \u } sur une page
+# dédiée, EN PLUS de la TOC statique existante (generate_toc_entries), jamais
+# en remplacement. La TOC statique reste le filet de sécurité KDP.
+#
+# POUR RETIRER LE TEST : supprimer (1) ce bloc fonction complet, et (2) son
+# unique appel dans main() marqué du même tag [TEST-TOC-NATIVE-FIELD]. Rien
+# d'autre à toucher.
+# ══════════════════════════════════════════════════════════════════════════
+def add_native_toc_field(document):
+    """Insère un champ TOC Word natif (calculé) sur une page séparée.
+
+    Contrairement à la TOC statique, ce champ est recalculé par Word à
+    l'ouverture (via w:updateFields) et reflète les vrais numéros de page /
+    la structure des styles Heading 1-3. Tant qu'il n'est pas recalculé, Word
+    affiche le texte de repli défini entre <w:fldChar separate> et
+    <w:fldChar end>, facilement repérable dans le rendu.
+    """
+    # a) Page dédiée pour la TOC native (distincte de la TOC statique)
+    document.add_page_break()
+
+    # b) Titre de section
+    document.add_heading("Table des matières", level=1)
+
+    # c) Paragraphe porteur du champ TOC, construit en XML bas niveau
+    paragraph = document.add_paragraph()
+    r_element = paragraph.add_run()._r
+
+    # <w:fldChar w:fldCharType="begin"/>
+    fld_begin = OxmlElement('w:fldChar')
+    fld_begin.set(qn('w:fldCharType'), 'begin')
+
+    # <w:instrText xml:space="preserve">TOC \o "1-3" \h \z \u</w:instrText>
+    instr = OxmlElement('w:instrText')
+    instr.set(qn('xml:space'), 'preserve')
+    instr.text = 'TOC \\o "1-3" \\h \\z \\u'
+
+    # <w:fldChar w:fldCharType="separate"/>
+    fld_sep = OxmlElement('w:fldChar')
+    fld_sep.set(qn('w:fldCharType'), 'separate')
+
+    # Texte de repli explicite (visible si le champ n'est pas recalculé)
+    fallback = OxmlElement('w:t')
+    fallback.set(qn('xml:space'), 'preserve')
+    fallback.text = ("Mettre à jour la table des matières "
+                     "(clic droit > Mettre à jour les champs)")
+
+    # <w:fldChar w:fldCharType="end"/>
+    fld_end = OxmlElement('w:fldChar')
+    fld_end.set(qn('w:fldCharType'), 'end')
+
+    for node in (fld_begin, instr, fld_sep, fallback, fld_end):
+        r_element.append(node)
+
+    # d) Recalcul auto du champ à l'ouverture Word (idempotent : n'ajoute pas
+    #    de doublon si w:updateFields est déjà présent dans settings.xml)
+    settings = document.settings.element
+    if settings.find(qn('w:updateFields')) is None:
+        update = OxmlElement('w:updateFields')
+        update.set(qn('w:val'), 'true')
+        settings.append(update)
+# ══════════════════════════════════════════════════════════════════════════
+# [TEST-TOC-NATIVE-FIELD] — FIN du bloc fonction
+# ══════════════════════════════════════════════════════════════════════════
+
 def configure_styles(doc):
     """Configure la police Georgia et les tailles demandées sur les styles de base."""
     # Style Normal
@@ -330,6 +397,11 @@ def main():
 
         # --- 7. SAUT DE PAGE ---
         doc.add_page_break()
+
+        # [TEST-TOC-NATIVE-FIELD] — appel unique du bloc de test (réversible).
+        # Ajoute une TOC Word native EN PLUS de la TOC statique ci-dessus.
+        # Retirer cette ligne (+ la fonction add_native_toc_field) pour annuler.
+        add_native_toc_field(doc)
 
         # Insertion des chapitres
         bookmark_id = 0
