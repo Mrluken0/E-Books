@@ -104,34 +104,7 @@ def ensure_toc_styles(doc):
             style.base_style = base
         style.paragraph_format.left_indent = Pt(indent_pt)
 
-def generate_toc_entries(doc, chapitres_data):
-    """Génère une table des matières STATIQUE (sans champ Word) à partir des chapitres.
 
-    Visible immédiatement à l'ouverture, sans mise à jour des champs (compatible KDP).
-    """
-    ensure_toc_styles(doc)
-    for chap in chapitres_data:
-        num = chap.get("numero", 1)
-        c_titre = chap.get("titre", "").strip()
-        p_chap = doc.add_paragraph(style="TOC 1")
-        add_internal_hyperlink(p_chap, f"Chapitre {num} — {c_titre}", _bookmark_name(num))
-        for idx, sub in enumerate(chap.get("sous_chapitres", [])):
-            s_titre = sub.get("titre", "").strip()
-            if s_titre:
-                p_sub = doc.add_paragraph(style="TOC 2")
-                add_internal_hyperlink(p_sub, s_titre, _bookmark_name(num, idx))
-
-# ══════════════════════════════════════════════════════════════════════════
-# [TEST-TOC-NATIVE-FIELD] — DÉBUT — bloc de test ISOLÉ et RÉVERSIBLE
-#
-# Ajoute un VRAI champ TOC Word natif { TOC \o "1-3" \h \z \u } sur une page
-# dédiée, EN PLUS de la TOC statique existante (generate_toc_entries), jamais
-# en remplacement. La TOC statique reste le filet de sécurité KDP.
-#
-# POUR RETIRER LE TEST : supprimer (1) ce bloc fonction complet, et (2) son
-# unique appel dans main() marqué du même tag [TEST-TOC-NATIVE-FIELD]. Rien
-# d'autre à toucher.
-# ══════════════════════════════════════════════════════════════════════════
 def add_native_toc_field(document):
     """Insère un champ TOC Word natif (calculé) sur une page séparée.
 
@@ -141,9 +114,7 @@ def add_native_toc_field(document):
     affiche le texte de repli défini entre <w:fldChar separate> et
     <w:fldChar end>, facilement repérable dans le rendu.
     """
-    # a) Page dédiée pour la TOC native (distincte de la TOC statique)
-    document.add_page_break()
-
+    
     # b) Titre de section
     document.add_heading("Table des matières", level=1)
 
@@ -184,9 +155,7 @@ def add_native_toc_field(document):
         update = OxmlElement('w:updateFields')
         update.set(qn('w:val'), 'true')
         settings.append(update)
-# ══════════════════════════════════════════════════════════════════════════
-# [TEST-TOC-NATIVE-FIELD] — FIN du bloc fonction
-# ══════════════════════════════════════════════════════════════════════════
+
 
 def configure_styles(doc):
     """Configure la police Georgia et les tailles demandées sur les styles de base."""
@@ -391,17 +360,12 @@ def main():
         # Tri strict par numéro
         chapitres_data.sort(key=lambda x: int(x["numero"]))
 
-        # --- 6. TABLE DES MATIÈRES (statique, visible sans mise à jour Word) ---
-        doc.add_heading("Table des matières", level=1)
-        generate_toc_entries(doc, chapitres_data)
+# --- 6. TABLE DES MATIÈRES (ancienne version statique retirée — voir TOC native ci-dessous) ---        doc.add_heading("Table des matières", level=1)
+        add_native_toc_field(doc)
 
         # --- 7. SAUT DE PAGE ---
         doc.add_page_break()
 
-        # [TEST-TOC-NATIVE-FIELD] — appel unique du bloc de test (réversible).
-        # Ajoute une TOC Word native EN PLUS de la TOC statique ci-dessus.
-        # Retirer cette ligne (+ la fonction add_native_toc_field) pour annuler.
-        add_native_toc_field(doc)
 
         # Insertion des chapitres
         bookmark_id = 0
