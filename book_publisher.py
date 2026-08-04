@@ -440,15 +440,17 @@ _JS_SELECT_NODE = """(nodeId) => {
     if (!target) target = selects.find(s => optOf(s));
     if (!target) return { ok: false, reason: 'aucun select ne propose nodeId=' + nodeId };
     const opt = optOf(target);
-    // Pose la valeur via le setter NATIF du prototype (contourne le value-tracker
-    // React) et FORCE le dispatch à CHAQUE appel (condition d'égalité retirée : en
-    // retry, la valeur DOM peut déjà être correcte alors que l'état React est resté
-    // sur le placeholder -> il faut re-notifier React quoi qu'il arrive).
-    const setter = Object.getOwnPropertyDescriptor(
-        window.HTMLSelectElement.prototype, 'value').set;
-    setter.call(target, opt.value);
-    target.dispatchEvent(new Event('input',  { bubbles: true }));
-    target.dispatchEvent(new Event('change', { bubbles: true }));
+    // Selects AUI en CASCADE (re-fetch des enfants à CHAQUE 'change') : on garde
+    // l'idempotence (ne (re)dispatch que si la valeur change réellement) et on
+    // n'émet PAS d'event 'input' — forcer/doubler les events réinitialisait la
+    // cascade et faisait disparaître les feuilles de classement (rubrique 2).
+    // Setter natif conservé (neutre ici : ces selects ne sont pas React).
+    if (target.value !== opt.value) {
+        const setter = Object.getOwnPropertyDescriptor(
+            window.HTMLSelectElement.prototype, 'value').set;
+        setter.call(target, opt.value);
+        target.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     return { ok: true, label: (opt.text || '').trim() };
 }"""
 
@@ -1613,6 +1615,15 @@ def submit_and_get_asin(page, config):
 
         # PAUSE diagnostic : inspection manuelle AVANT l'envoi réel de la publication.
         page.pause()
+
+        # Garde-fou anti-publication accidentelle (même logique que KDP_SUBMIT_COVER) :
+        # le clic Publier ne part QUE si KDP_DO_PUBLISH est explicitement positionné.
+        # Protège le cas où page.pause() ne bloquerait pas en lancement détaché.
+        if not os.environ.get("KDP_DO_PUBLISH"):
+            log("KDP_DO_PUBLISH non positionné — ARRÊT juste avant le clic Publier "
+                "(aucune publication déclenchée). Relancer avec KDP_DO_PUBLISH=1 pour "
+                "exécuter la publication réelle.")
+            return "PUBLICATION_SKIPPED_GUARD"
 
         # Bouton "Publier votre ebook Kindle" (vérifié en live)
         page.click("#save-and-publish-announce")
