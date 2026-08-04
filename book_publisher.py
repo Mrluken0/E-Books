@@ -225,8 +225,6 @@ def fill_book_details(page, config):
             page.fill(f"#data-keywords-{i}", mot)
 
         # --- Enregistrer et continuer vers l'étape Contenu ---
-        # PAUSE diagnostic : inspection manuelle AVANT de valider l'étape /details.
-        page.pause()
         page.click("#save-and-continue")
 
     except TimeoutError as e:
@@ -1004,6 +1002,58 @@ def _fill_ai_questionnaire(page, config):
 # ---------------------------------------------------------------------------
 # ÉTAPE 2.2 — COUVERTURE (Cover Creator)
 # ---------------------------------------------------------------------------
+def _select_own_cover_choice(page):
+    """
+    Bascule le choix de couverture sur « Charger une couverture déjà en votre
+    possession » AVANT tout upload d'image.
+
+    /!\\ Vérifié en live (2026-08) : ce n'est PAS un <input radio> mais un ACCORDÉON
+    AUI (#data-cover-choice-accordion) à 2 lignes, SANS data-a-accordion-row-name
+    (on cible donc par libellé). Le choix réel est stocké dans l'input caché
+    #data-cover-choice (name data[cover_choice]) : défaut 'cover-creator', valeur
+    'upload' pour l'option « couverture perso ». Sans ce basculement, KDP garde
+    cover_choice='cover-creator' et IGNORE le fichier uploadé (couverture considérée
+    comme absente -> déclencheur probable du bandeau générique à la publication).
+    """
+    # Idempotence : déjà sur l'option upload ? (rien à faire)
+    if page.evaluate("() => (document.querySelector('#data-cover-choice') || {}).value || null") == "upload":
+        log("Choix couverture déjà sur « couverture perso » (cover_choice=upload).")
+        return
+
+    log("Bascule du choix couverture -> « Charger une couverture déjà en votre possession »...")
+    row = page.locator(
+        "#data-cover-choice-accordion a.a-accordion-row", has_text="Charger une couverture"
+    ).first
+    row.wait_for(state="visible", timeout=TIMEOUT)
+    row.scroll_into_view_if_needed()
+    try:
+        row.click()
+    except Exception:
+        # Accordéon AUI à handler délégué / anchor 0-size : fallback clic JS.
+        page.evaluate(
+            """() => {
+                const acc = document.querySelector('#data-cover-choice-accordion');
+                const a = acc && [...acc.querySelectorAll('a.a-accordion-row')]
+                    .find(x => /Charger une couverture/i.test(x.innerText));
+                if (a) a.click();
+            }"""
+        )
+
+    try:
+        page.wait_for_function(
+            "() => { const i = document.querySelector('#data-cover-choice');"
+            " return !!(i && i.value === 'upload'); }",
+            timeout=TIMEOUT,
+        )
+    except TimeoutError:
+        raise Exception(
+            "Choix couverture : bascule vers 'upload' échouée "
+            "(#data-cover-choice != 'upload' après clic). L'accordéon "
+            "#data-cover-choice-accordion n'a pas basculé."
+        )
+    log("Choix couverture = 'upload' (couverture perso).")
+
+
 def use_cover_creator(context, page, config):
     """
     Gère la couverture (toujours sur la page /content).
@@ -1027,6 +1077,13 @@ def use_cover_creator(context, page, config):
             cover_path = os.path.abspath(cover_path)
             if not os.path.exists(cover_path):
                 raise FileNotFoundError(f"Couverture introuvable : {cover_path}")
+
+            # /!\ Basculer d'abord le choix sur « Charger une couverture déjà en
+            # votre possession » : sinon data[cover_choice] reste 'cover-creator'
+            # et KDP IGNORE le fichier uploadé (couverture jugée absente -> blocage
+            # générique à la publication). Vérifié en live 2026-08.
+            _select_own_cover_choice(page)
+
             log(f"Upload de la couverture : {cover_path}")
             page.set_input_files("#data-assets-cover-file-upload-AjaxInput", cover_path)
 
@@ -1408,8 +1465,6 @@ def save_content_and_continue(page):
         _affirm_questionnaires(page)
 
         page.wait_for_selector("#save-and-continue", state="attached", timeout=TIMEOUT)
-        # PAUSE diagnostic : inspection manuelle AVANT de valider l'étape /content.
-        page.pause()
         page.click("#save-and-continue")
 
         # /!\\ Quand le manuscrit/couverture viennent d'être (ré)uploadés, KDP peut
@@ -1537,44 +1592,6 @@ class PublicationBlocked(Exception):
     pass
 
 
-def _log_publish_responses(responses):
-    """
-    Lit et logue le CORPS COMPLET des réponses save-and-publish / client-side-error
-    capturées pendant la publication (voir submit_and_get_asin).
-
-    Les checks 'errors' / 'saveErrorAggregatedErrors' ne regardent qu'une partie du
-    corps ; ici on dumpe TOUT (à la recherche d'un flag type canPublish:false,
-    warnings, statut de validation, etc.). Lecture effectuée HORS du handler d'event
-    (pas de deadlock API sync) et tant que la page est vivante. Écrit à la fois sur
-    stderr (via log) et, best-effort, dans kdp_publish_responses.log (répertoire courant).
-    """
-    if not responses:
-        log("INSTRUMENTATION réseau : aucune réponse save-and-publish/client-side-error capturée.")
-        return
-    entries = []
-    for resp in responses:
-        entry = {"url": getattr(resp, "url", None), "status": None, "body": None}
-        try:
-            entry["status"] = resp.status
-        except Exception as e:
-            entry["statusErr"] = str(e)
-        try:
-            entry["body"] = resp.text()
-        except Exception as e:
-            entry["bodyErr"] = str(e)
-        entries.append(entry)
-    payload = json.dumps(entries, ensure_ascii=False, indent=2)
-    log("INSTRUMENTATION réseau — corps complet save-and-publish / client-side-error :")
-    log(payload)
-    try:
-        path = os.path.join(os.getcwd(), "kdp_publish_responses.log")
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(payload + "\n")
-        log(f"Corps des réponses également écrit dans : {path}")
-    except Exception as e:
-        log(f"Écriture du log réseau échouée : {e}")
-
-
 def submit_and_get_asin(page, config):
     """
     Soumet le livre puis récupère l'ASIN de façon robuste :
@@ -1583,23 +1600,6 @@ def submit_and_get_asin(page, config):
       3. Sinon "PENDING" (KDP peut mettre quelques minutes à l'attribuer)
     """
     log("Soumission du livre pour publication...")
-
-    # --- Instrumentation réseau (diagnostic du bandeau générique) ---
-    # Capture les réponses save-and-publish / client-side-error pour en loguer le
-    # CORPS COMPLET. /!\ API sync Playwright : NE PAS lire resp.text() dans le
-    # handler (deadlock, cf. _open_categories_modal) -> on ne mémorise que l'objet
-    # réponse ; lecture différée dans le finally (page encore vivante).
-    _pub_resp = []
-
-    def _on_pub_response(resp):
-        try:
-            if "save-and-publish" in resp.url or "client-side-error" in resp.url:
-                _pub_resp.append(resp)
-        except Exception:
-            pass
-
-    page.on("response", _on_pub_response)
-
     try:
         # --- Garde-fou pré-publication ---
         # Si le bouton Publier est désactivé (compte KDP incomplet : infos
@@ -1612,18 +1612,6 @@ def submit_and_get_asin(page, config):
                 "(compte KDP incomplet : infos fiscales/bancaires, ou pré-requis "
                 "du livre non satisfaits comme la couverture)."
             )
-
-        # PAUSE diagnostic : inspection manuelle AVANT l'envoi réel de la publication.
-        page.pause()
-
-        # Garde-fou anti-publication accidentelle (même logique que KDP_SUBMIT_COVER) :
-        # le clic Publier ne part QUE si KDP_DO_PUBLISH est explicitement positionné.
-        # Protège le cas où page.pause() ne bloquerait pas en lancement détaché.
-        if not os.environ.get("KDP_DO_PUBLISH"):
-            log("KDP_DO_PUBLISH non positionné — ARRÊT juste avant le clic Publier "
-                "(aucune publication déclenchée). Relancer avec KDP_DO_PUBLISH=1 pour "
-                "exécuter la publication réelle.")
-            return "PUBLICATION_SKIPPED_GUARD"
 
         # Bouton "Publier votre ebook Kindle" (vérifié en live)
         page.click("#save-and-publish-announce")
@@ -1673,11 +1661,6 @@ def submit_and_get_asin(page, config):
         raise Exception(f"Timeout étape finale (publication) — {str(e)}")
     except Exception as e:
         raise Exception(f"Erreur étape finale (publication / récupération ASIN) : {str(e)}")
-    finally:
-        # Lecture des corps MAINTENANT (page encore vivante, HORS handler -> pas de
-        # deadlock sync) puis retrait du listener, quoi qu'il soit arrivé au-dessus.
-        _log_publish_responses(_pub_resp)
-        page.remove_listener("response", _on_pub_response)
 
 
 def _publish_is_blocked(page):
