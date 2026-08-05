@@ -538,24 +538,15 @@ _JS_DIAG_MODAL = """(nodeId) => {
 
 def _open_categories_modal(page, first_node_id):
     """
-    Ouvre la modal des rubriques et ATTEND que la cascade soit réellement prête :
-    qu'un <select> encore sur son placeholder propose déjà le nodeId du niveau 0.
+    Ouvre la modal des rubriques et ATTEND une vraie fin de chargement (stabilité du
+    DOM), pas un délai fixe ni un nombre de tentatives devinés.
 
-    Remplace l'ancien `click + wait_for_timeout(1500)` fixe (cause du bug « aucun
-    select ne propose nodeId=... » au niveau 0). Robuste aux échecs possibles :
-      - bouton désactivé (question « contenu adulte » non répondue) -> exception ciblée ;
-      - clic d'ouverture silencieusement perdu (bouton hors viewport / recouvert par
-        un overlay) -> scroll + fallback clic JS ;
-      - arbre des rubriques récupéré sur le réseau APRÈS le clic (cache froid du profil
-        Playwright, 1500 ms trop court) -> on attend le nodeId L0 au lieu d'un délai en dur.
-
-    En cas d'échec, journalise un DIAGNOSTIC qui tranche entre les hypothèses.
+    Détection de fin de chargement (05/08/2026) : le nombre total d'options cumulées
+    sur tous les <select> de la page cesse de changer pendant STABLE_MS consécutives
+    -> signal robuste, indépendant du nom de l'endpoint réseau qui sert la cascade
+    (contrairement au filtrage sur 'browse-nodes'/'get-root-nodes', qui peut manquer
+    la vraie requête si KDP renomme son API).
     """
-    # 0) Le bouton reste DÉSACTIVÉ tant que la question « Images/contenu à connotation
-    #    sexuelle » (data[is_adult_content]-radio) n'a pas de réponse — vérifié en live :
-    #    KDP affiche « Répondez à la question concernant la catégorie réservée aux adultes
-    #    avant de sélectionner… ». On attend qu'il soit RÉELLEMENT actionnable, avec un
-    #    diagnostic ciblé sinon (au lieu d'un time-out Playwright opaque sur le clic).
     btn = page.wait_for_selector("#categories-modal-button", state="visible", timeout=TIMEOUT)
     try:
         page.wait_for_function(
@@ -571,17 +562,10 @@ def _open_categories_modal(page, first_node_id):
             "(page.check value=false) avant select_categories."
         )
 
-    # Capture réseau CIBLÉE : la modal peuple son select L0 via un POST
-    # .../browse-nodes/get-root-nodes/ (vérifié en live 2026-07-10). Quand la cascade
-    # reste vide, la vraie cause est presque toujours CE POST (statut != 200 ou corps
-    # vide selon la session/marketplace du profil). On journalise son statut + un extrait.
-    captured = []      # {url, status} — rempli SYNCHRONEMENT dans le handler
-    _resp_objs = []    # (info, response) — corps lus APRÈS, hors du callback
+    captured = []
+    _resp_objs = []
 
     def _on_response(resp):
-        # /!\ API sync Playwright : NE PAS appeler resp.text() ici (aller-retour
-        # navigateur depuis un callback d'event -> DEADLOCK). On ne lit que url/status
-        # (dispo sans round-trip) et on diffère la lecture du corps hors du handler.
         try:
             if "browse-nodes" in resp.url or "get-root-nodes" in resp.url:
                 info = {"url": resp.url.split("/details/")[-1], "status": resp.status}
@@ -592,40 +576,63 @@ def _open_categories_modal(page, first_node_id):
 
     page.on("response", _on_response)
     try:
-        # 1) Clic d'ouverture fiabilisé
         btn.scroll_into_view_if_needed()
         try:
             btn.click()
         except Exception:
-            # Un overlay intercepte le clic natif -> clic JS direct sur le bouton.
             page.evaluate("() => document.querySelector('#categories-modal-button')?.click()")
 
-        # 2) Attente CIBLÉE : cascade niveau 0 prête (select placeholder proposant le nodeId)
+        # Reset l'état de suivi de stabilité (au cas où cette fonction serait rappelée
+        # dans la même session page — évite de réutiliser un état d'un essai précédent).
+        page.evaluate("() => { window.__catPoll = null; }")
+
+        STABLE_MS = 800  # durée sans changement pour considérer le chargement terminé
+        _JS_STABLE = f"""() => {{
+            if (!window.__catPoll) {{
+                window.__catPoll = {{ count: -1, ts: Date.now() }};
+            }}
+            const total = [...document.querySelectorAll('select')]
+                .reduce((sum, s) => sum + s.options.length, 0);
+            if (total !== window.__catPoll.count) {{
+                window.__catPoll.count = total;
+                window.__catPoll.ts = Date.now();
+                return false;
+            }}
+            return (Date.now() - window.__catPoll.ts) > {STABLE_MS};
+        }}"""
+
+        # 1) Attendre que le DOM soit STABLE (plus aucune option ajoutée nulle part)
         try:
-            page.wait_for_function(_JS_NIVEAU_PRET, arg=first_node_id, timeout=TIMEOUT)
+            page.wait_for_function(_JS_STABLE, timeout=TIMEOUT)
         except TimeoutError:
-            diag = page.evaluate(_JS_DIAG_MODAL, first_node_id)
-            # Lecture des corps MAINTENANT (hors callback -> pas de deadlock sync).
-            for info, resp in _resp_objs:
-                try:
-                    body = resp.text()
-                    info["len"] = len(body)
-                    info["snippet"] = body[:300]
-                except Exception as e:
-                    info["bodyErr"] = str(e)
-            log(f"DIAGNOSTIC modal catégories (nodeId L0={first_node_id}) : {diag}")
-            log(f"DIAGNOSTIC réseau get-root-nodes : {captured or 'AUCUN POST browse-nodes capturé'}")
-            raise Exception(
-                f"Modal catégories : le niveau 0 (nodeId={first_node_id}) n'est jamais "
-                f"devenu disponible après clic sur #categories-modal-button. "
-                f"Diagnostic DOM : {diag}. Réseau get-root-nodes : {captured}. "
-                "Lecture : POST get-root-nodes absent => clic n'a pas déclenché le fetch ; "
-                "status != 200 => fetch refusé (session/marketplace du profil kdp-profile) ; "
-                "status 200 mais corps court/vide => l'arbre revient vide pour cette session."
-            )
+            pass  # on tombe sur le diagnostic ci-dessous de toute façon
+
+        # 2) Vérification définitive : le nodeId attendu est-il là, une fois stable ?
+        diag = page.evaluate(_JS_DIAG_MODAL, first_node_id)
+        if diag["nodeIdProposed"]:
+            return  # succès : chargement stable ET catégorie présente
+
+        # Chargement stable mais catégorie réellement absente -> vraie anomalie,
+        # pas une histoire de timing. On lève l'exception avec diagnostic complet.
+        for info, resp in _resp_objs:
+            try:
+                body = resp.text()
+                info["len"] = len(body)
+                info["snippet"] = body[:300]
+            except Exception as e:
+                info["bodyErr"] = str(e)
+        log(f"DIAGNOSTIC modal catégories (nodeId L0={first_node_id}) : {diag}")
+        log(f"DIAGNOSTIC réseau get-root-nodes : {captured or 'AUCUN POST browse-nodes capturé'}")
+        raise Exception(
+            f"Modal catégories : chargement STABLE mais le niveau 0 (nodeId={first_node_id}) "
+            f"reste absent des options chargées. Diagnostic DOM : {diag}. "
+            f"Réseau get-root-nodes : {captured}. "
+            "Lecture : la liste a fini de se peupler mais ne contient jamais ce nodeId "
+            "-> vérifier que kdp_categories_tree.json est à jour, ou que la catégorie "
+            "est disponible sur ce marketplace/cette session."
+        )
     finally:
         page.remove_listener("response", _on_response)
-
 
 def _remplir_rubrique_cascade(page, chemin_node_ids, libelle=None):
     """
