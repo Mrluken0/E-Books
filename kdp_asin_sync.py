@@ -22,6 +22,8 @@ import base64
 import json
 import re
 import sys
+import time
+import unicodedata
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
@@ -39,36 +41,135 @@ def from_b64(s):
     return base64.b64decode(s).decode("utf-8") if s else ""
 
 
-def _extract_asin_from_text(text):
-    match = re.search(r"\b(B0[A-Z0-9]{8})\b", text)
-    return match.group(1) if match else None
+# Apostrophes typographiques / accents graves détournés -> apostrophe droite ASCII.
+_APOS_TABLE = dict.fromkeys(map(ord, "’‘ʼ´`"), ord("'"))
+
+
+def _normalize(s):
+    """Normalise un titre pour comparaison robuste.
+
+    Le DOM Bookshelf réserve deux pièges au matching par titre :
+      - une apostrophe droite (U+0027) que la source pourrait fournir en
+        typographique (U+2019), ou l'inverse -> on unifie tout en U+0027 ;
+      - un ESPACE INSÉCABLE (U+00A0) inséré avant les « : » ("L'Effet
+        Micro-Calme : ...") là où la chaîne de recherche a un espace
+        normal -> on remplace les espaces insécables/fins par un espace normal
+        et on réduit les runs d'espaces.
+    Les accents sont conservés (ils sont significatifs et présents des deux
+    côtés) ; on applique juste NFC pour aligner accents composés/précomposés.
+    """
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFC", s).translate(_APOS_TABLE)
+    for ws in (" ", " ", " "):
+        s = s.replace(ws, " ")
+    return re.sub(r"\s+", " ", s).strip().casefold()
+
+
+# Extraction DOM : le Bookshelf « refreshed » est une table Amazon « mt ».
+# Chaque livre = un groupe de cellules partageant data-row=<titleId interne KDP>
+# (ex. 262DWNTJW92) — ce n'est PAS l'ASIN. L'ASIN (B0XXXXXXXX) n'apparaît nulle
+# part en attribut de ligne : il vit uniquement dans les href des liens
+# marketplace/X-Ray d'une cellule action de la même ligne
+# (/amazon-dp-action/fr/dualbookshelf.marketplacelink/B0XXXXXXXX). Le titre
+# COMPLET (titre + sous-titre concaténés) est dans un span.title-link-label de
+# la cellule metadata (non tronqué ; la troncature visible est purement CSS).
+# On itère les titres, on remonte au data-row, puis on récupère l'ASIN parmi
+# toutes les cellules de ce data-row.
+_EXTRACT_JS = r"""
+() => {
+    const asinRe = /B0[A-Z0-9]{8}/;
+    const esc = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : s;
+    const seen = new Set();
+    const out = [];
+    document.querySelectorAll('.title-link-label').forEach(span => {
+        // .title-link-label matche aussi un span « série » parasite (surtout
+        // des espaces) -> on l'exclut, et on ignore tout titre vide.
+        if ((span.className || '').indexOf('manage-series-link') !== -1) return;
+        const title = (span.textContent || '').trim();
+        if (!title) return;
+        let rid = null, cur = span;
+        for (let i = 0; i < 25 && cur; i++) {
+            if (cur.getAttribute && cur.getAttribute('data-row')) { rid = cur.getAttribute('data-row'); break; }
+            cur = cur.parentElement;
+        }
+        if (!rid || seen.has(rid)) return;
+        let asin = null;
+        document.querySelectorAll('[data-row="' + esc(rid) + '"]').forEach(cell => {
+            if (asin) return;
+            const a = cell.querySelector('a[href*="marketplacelink/"], a[href*="xray/verify/"]');
+            if (a) { const m = a.href.match(asinRe); if (m) asin = m[0]; }
+        });
+        // Cellule metadata complète -> contient aussi l'auteur (désambiguïsation).
+        let metaEl = span;
+        for (let i = 0; i < 25 && metaEl; i++) {
+            if (metaEl.getAttribute && metaEl.getAttribute('data-row')) break;
+            metaEl = metaEl.parentElement;
+        }
+        const metaText = ((metaEl && metaEl.innerText) || span.textContent || '').replace(/\s+/g, ' ').trim();
+        out.push({ rid: rid, title: title, asin: asin, metaText: metaText });
+        seen.add(rid);
+    });
+    return out;
+}
+"""
+
+
+def _read_books(page):
+    """Extrait la liste des livres visibles [{rid, title, asin, metaText}, ...].
+
+    Le tableau « refreshed bookshelf » se (re)rend de façon asynchrone : on
+    attend l'ATTACHEMENT d'un titre (surtout pas l'état « visible » par défaut :
+    le premier .title-link-label du DOM est un span « série » parasite jamais
+    visible, ce qui ferait expirer l'attente), puis on ré-extrait avec quelques
+    scrolls si la première passe revient vide (rendu tardif des lignes).
+    """
+    try:
+        page.wait_for_selector(".title-link-label", state="attached", timeout=15000)
+    except PWTimeout:
+        pass  # on tente quand même l'extraction ci-dessous
+    for _ in range(5):
+        books = page.evaluate(_EXTRACT_JS)
+        if books:
+            return books
+        page.mouse.wheel(0, 3000)
+        time.sleep(1.5)
+    return []
 
 
 def scrape_asin(page, titre, auteur):
     """
-    Cherche la ligne du livre sur le Bookshelf par titre. KDP concatène parfois
-    titre + sous-titre sur une seule ligne affichée (cf. capture partagée :
-    "Le Calme à Portée de Main : 7 Routines Simples..."), donc on cherche sur
-    le titre principal seul, et on désambiguïse par auteur si plusieurs lignes
-    matchent (titre partiel commun à plusieurs livres).
+    Retrouve l'ASIN d'un livre par son titre sur le Bookshelf.
+
+    Le titre affiché concatène titre principal + sous-titre ("L'Effet
+    Micro-Calme : Le guide ..."), donc on matche le titre recherché comme
+    SOUS-CHAÎNE normalisée du titre affiché (voir _normalize pour apostrophe /
+    espace insécable / accents). En cas d'ambiguïté (plusieurs livres dont le
+    titre affiché contient la chaîne cherchée), on désambiguïse par auteur
+    (présent dans la cellule metadata).
     """
     try:
-        rows = page.locator("[data-asin]", has_text=titre)
-        count = rows.count()
-        if count == 0:
+        books = _read_books(page)
+        if not books:
             return None, "not_found"
-        if count == 1:
-            row = rows.first
-        else:
-            row = rows.filter(has_text=auteur).first
-            if row.count() == 0:
-                return None, "ambiguous"
-        row.wait_for(timeout=10000)
-        asin = row.get_attribute("data-asin")
-        if asin and re.fullmatch(r"[A-Z0-9]{10}", asin):
-            return asin, "success"
-        found = _extract_asin_from_text(row.inner_text())
-        return found, ("success" if found else "not_found")
+
+        needle = _normalize(titre)
+        if not needle:
+            return None, "not_found"
+
+        candidates = [b for b in books if b.get("asin") and needle in _normalize(b["title"])]
+        if not candidates:
+            return None, "not_found"
+        if len(candidates) == 1:
+            return candidates[0]["asin"], "success"
+
+        # Plusieurs titres correspondent -> filtre par auteur.
+        needle_auteur = _normalize(auteur)
+        if needle_auteur:
+            strict = [b for b in candidates if needle_auteur in _normalize(b["metaText"])]
+            if len(strict) == 1:
+                return strict[0]["asin"], "success"
+        return None, "ambiguous"
     except PWTimeout:
         return None, "not_found"
     except Exception as e:
