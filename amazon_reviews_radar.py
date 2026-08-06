@@ -395,9 +395,10 @@ def main():
             config_data = json.load(f)
         args.category = config_data.get("category", args.category)
         args.angle = config_data.get("angle", args.angle)
-        print(f"Lecture du radar : {RADAR_FILE}", file=sys.stderr)
-        df_scores = pd.read_excel(RADAR_FILE, sheet_name="scores")
-        df_data   = pd.read_excel(RADAR_FILE, sheet_name="data")
+
+    print(f"Lecture du radar : {RADAR_FILE}", file=sys.stderr)
+    df_scores = pd.read_excel(RADAR_FILE, sheet_name="scores")
+    df_data   = pd.read_excel(RADAR_FILE, sheet_name="data")
 
     # MODE CIBLÉ
     if args.category:
