@@ -39,7 +39,7 @@ BLOCK_SIGNALS = [
 
 MIN_RELEVANT_BOOKS      = 6
 TOP_BOOKS_PER_NICHE     = 5
-MIN_KDP_SCORE           = 40
+MIN_KDP_SCORE           = 70
 
 TARGET_NEGATIVE_REVIEWS = 20   # quota d'avis négatifs de qualité visé par niche
 MAX_BOOKS_HARD_CAP      = 25   # plafond dur de livres scrapés (sécurité anti-blocage)
@@ -108,7 +108,7 @@ def _tokenize(text):
         "vous", "nous", "leur", "leurs", "comment", "guide", "livre",
         "méthode", "pratique", "simple", "débutant", "être", "faire",
         "avoir", "cette", "celui", "ceux", "comme", "mais", "donc",
-        "aussi", "très", "bien", "moins", "même", "autre"
+        "aussi", "très", "bien", "moins", "même", "autre", "après", "avant", "pendant", "toujours", "jamais", "peut", "peuvent"
     }
     return {w for w in text.split() if len(w) >= 4 and w not in stopwords}
 
